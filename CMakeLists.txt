@@ -197,9 +197,17 @@ if(LV_BUILD_TESTS)
                                        engine/scripting/visual/JsonMini.cpp
                                        ${LV_LVSCRIPT_SOURCES})
     add_executable(stdlib_tests       tests/stdlib_tests.cpp ${LV_LVSCRIPT_SOURCES})
+    # Сериализация байткода и дисковый кэш .lvc.
+    add_executable(bytecode_tests     tests/bytecode_tests.cpp ${LV_LVSCRIPT_SOURCES})
+    # Иерархия сущностей: Parent/Children/WorldTransform + матричные хелперы.
+    add_executable(hierarchy_tests    tests/hierarchy_tests.cpp
+                                       engine/ecs/Registry.cpp
+                                       engine/ecs/Hierarchy.cpp
+                                       engine/ecs/World.cpp
+                                       engine/core/JobSystem.cpp)
 
     foreach(suite lvscript_tests ecs_tests render_tests input_tests job_tests
-                  visualscript_tests stdlib_tests)
+                  visualscript_tests stdlib_tests bytecode_tests hierarchy_tests)
         target_include_directories(${suite} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/engine)
         target_link_libraries(${suite} PRIVATE Threads::Threads)
         add_test(NAME ${suite} COMMAND ${suite}

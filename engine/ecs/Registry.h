@@ -182,6 +182,10 @@ public:
         return get<T>(e);
     }
 
+    /// Псевдоним emplace — более выразительно в коде иерархий и WorldTransform.
+    template <Component T>
+    T* getOrEmplace(Entity e, const T& value = T{}) { return emplace<T>(e, value); }
+
     /// Удалить компонент. Возвращает true, если компонент был.
     template <Component T>
     bool remove(Entity e);

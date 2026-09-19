@@ -49,6 +49,13 @@ simple_suite visualscript_tests tests/visualscript_tests.cpp engine/scripting/vi
 # Стандартная библиотека LV Script (stdlib/*.lvs) проверяется отдельным сьютом:
 # он грузит модули из рабочего каталога, поэтому запускается из корня репозитория.
 simple_suite stdlib_tests    tests/stdlib_tests.cpp $LV_SRC
+# Сериализация байткода (.lvc) и дисковый кэш: round-trip, переотображение
+# таблицы имён между разными VM, устойчивость к повреждённым файлам.
+simple_suite bytecode_tests  tests/bytecode_tests.cpp $LV_SRC
+# Иерархия сущностей: Parent/Children/WorldTransform, каскад world-матриц,
+# защита от циклов и матричные хелперы (inverse/extract*).
+simple_suite hierarchy_tests tests/hierarchy_tests.cpp engine/ecs/Registry.cpp \
+                             engine/ecs/Hierarchy.cpp engine/ecs/World.cpp engine/core/JobSystem.cpp
 
 run_suite engine_integration_tests tests/engine_integration_tests.cpp $ENGINE_SRC
 

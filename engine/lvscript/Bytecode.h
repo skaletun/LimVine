@@ -20,6 +20,9 @@
 
 namespace lv {
 
+// Версия .lvc определена в Common.h (kBytecodeVersion = 0x0001'0000).
+// Магическое число и endian-agnostic запись выполняет сериализатор.
+
 /**
  * @brief Коды инструкций виртуальной машины.
  *
@@ -201,7 +204,7 @@ public:
  * перекомпилируется. Это даёт мгновенный старт редактора на больших проектах.
  */
 struct BytecodeModule {
-    std::uint32_t version = kBytecodeVersion;
+    std::uint32_t version = 0;
     std::uint64_t sourceHash = 0;
     SourceName    name;
     ObjFunction*  entry = nullptr;   ///< Прототип верхнего уровня (владеет VM).
@@ -210,6 +213,8 @@ struct BytecodeModule {
     [[nodiscard]] std::vector<Byte> serialize(VM& vm) const;
     /// Возвращает nullopt, если версия/хэш не совпали.
     [[nodiscard]] static std::optional<BytecodeModule> deserialize(VM& vm, std::span<const Byte> data);
+    /// Вычисление FNV-1a хэша исходного текста (для кэширования).
+    [[nodiscard]] static std::uint64_t sourceHashOf(std::string_view src);
 };
 
 } // namespace lv

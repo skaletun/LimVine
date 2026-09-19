@@ -11,13 +11,15 @@ limvine/
 │   │   ├── Component.h         #   концепт Component, TypeId, ComponentMetaRegistry
 │   │   ├── Registry.h/.cpp     #   архетипный реестр: SoA-пулы, swap-remove, поколения
 │   │   ├── CommandBuffer.h     #   отложенные структурные изменения
+│   │   ├── Hierarchy.h/.cpp    #   Parent/Children/WorldTransform, setParent, BFS world-матриц
 │   │   └── World.h/.cpp        #   фазы кадра и планировщик систем
 │   ├── lvscript/               # LV Script — отдельная библиотека (не знает о движке)
 │   │   ├── Common.h            #   lv::format, lv::Expected (замена std::expected)
 │   │   ├── Lexer.h/.cpp        #   токены, интерполяция строк, мягкие ключевые слова
 │   │   ├── Parser.h/.cpp       #   AST; блоки do..end, if-выражения, лямбды, match
 │   │   ├── AST.h/.cpp          #   узлы выражений/операторов, Param, MethodDecl, FieldDecl
-│   │   ├── Bytecode.h          #   Op, ObjFunction, Disassembler, контейнер .lvc
+│   │   ├── Bytecode.h/.cpp     #   Op, Disassembler, (де)сериализация .lvc, таблица имён
+│   │   ├── BytecodeCache.h/.cpp#   дисковый кэш .lvc: проверка версии и хэша, атомарная запись
 │   │   ├── Compiler.h/.cpp     #   AST → байткод; moduleGlobals_, области видимости
 │   │   ├── Value.h/.cpp        #   NaN-boxing Value, Obj* (String/Array/Map/Closure/…)
 │   │   ├── GC.h/.cpp           #   mark-and-sweep, pin, бюджет памяти
@@ -85,6 +87,8 @@ limvine/
 ├── tests/                      # self-test'ы (без внешнего тестового фреймворка)
 │   ├── lvscript_tests.cpp      #   язык — 53 проверки
 │   ├── ecs_tests.cpp           #   13
+│   ├── hierarchy_tests.cpp     #   иерархия + матричные хелперы — 44
+│   ├── bytecode_tests.cpp      #   .lvc round-trip и дисковый кэш — 74
 │   ├── render_tests.cpp        #   15
 │   ├── input_tests.cpp         #   17
 │   ├── job_tests.cpp           #   6
@@ -100,7 +104,7 @@ limvine/
 │   ├── 03_lvscript_spec.md     #   спецификация языка + биндинги движка
 │   └── 04_engine_systems.md    #   API подсистем и рецепты
 │
-├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 10 тестов
+├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 12 тестов
 ├── build_tests.sh              # то же самое без cmake (g++ напрямую)
 └── README.md                   # быстрый старт, состав движка, обзор языка и шаблонов
 ```

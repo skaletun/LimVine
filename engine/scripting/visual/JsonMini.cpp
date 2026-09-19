@@ -4,6 +4,7 @@
  */
 #include "JsonMini.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>

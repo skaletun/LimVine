@@ -1981,6 +1981,7 @@ const char* opName(Op op) noexcept {
         LV_OP(ArrayPush) LV_OP(ArraySetAt) LV_OP(MapInsert) LV_OP(NewArray) LV_OP(NewMap)
         LV_OP(NewRange) LV_OP(Slice) LV_OP(Len) LV_OP(IterInit) LV_OP(IterNext) LV_OP(IterKeyNext)
         LV_OP(SetLoopSlots) LV_OP(StorePair) LV_OP(ForRangePrep) LV_OP(ForRangeLoop)
+        LV_OP(ForIterPrep) LV_OP(ForIterNext) LV_OP(IsInstancePeek)
         LV_OP(Call) LV_OP(CallSpread) LV_OP(CallMethod) LV_OP(InvokeSuper) LV_OP(PackRest)
         LV_OP(Closure) LV_OP(MakeCoroutine) LV_OP(Return) LV_OP(ReturnNil)
         LV_OP(NewInstance) LV_OP(GetClass) LV_OP(Class) LV_OP(ClassSuper) LV_OP(ClassMethod)

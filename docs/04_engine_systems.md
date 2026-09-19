@@ -70,6 +70,45 @@ world.addSystem(std::move(sys));
 world.tick(1.0f / 60.0f);                      // исполняет фазы по порядку
 ```
 
+### 1.1 Иерархия сущностей
+
+`Transform` — всегда **локальное** преобразование. Родительские связи задаются
+`setParent`, а мировые величины движок кладёт в `WorldTransform`:
+
+```cpp
+#include "ecs/Hierarchy.h"
+
+Entity player = reg.create();  reg.add<Transform>(player)->position = {10, 0, 0};
+Entity weapon = reg.create();  reg.add<Transform>(weapon)->position = {0.3f, 1.2f, 0};
+
+setParent(reg, weapon, player);                // оружие в руке игрока
+
+world.tick(dt);                                // PostPhysics обновит матрицы
+
+const WorldTransform* wt = reg.get<WorldTransform>(weapon);
+Vec3 muzzle = wt->worldPosition;               // {10.3, 1.2, 0} — уже в мире
+```
+
+| Операция | Вызов |
+|---|---|
+| прикрепить | `setParent(reg, child, parent)` |
+| прикрепить, не сдвинув объект | `setParent(reg, child, parent, /*keepWorldPosition=*/true)` |
+| открепить в корень | `setParent(reg, child, kNullEntity)` |
+| матрица без учёта кэша | `computeWorldMatrix(reg, e)` |
+| обновить вручную (вне `World`) | `updateWorldTransforms(reg)` |
+
+Попытка создать цикл (`A → B → A` или родитель сам себе) бросает
+`HierarchyCycleError`, оставляя граф неизменным. Дети уничтоженного родителя
+автоматически становятся корнями.
+
+`WorldTransform::version` монотонно растёт при каждом пересчёте — это дешёвый
+dirty-триггер: система может сравнить сохранённую версию и пропустить работу,
+если объект не двигался.
+
+> Внутри обхода иерархии нельзя добавлять и удалять компоненты у сущностей,
+> участвующих в графе: это структурное изменение, которое переселяет сущность
+> между архетипами и инвалидирует итераторы. Отложите его в `CommandBuffer`.
+
 ---
 
 ## 2. LV Script в движке
@@ -178,7 +217,7 @@ lvrun templates/farming_iso --input --frames 120   # подать демонст
 lvrun script.lvs                               # отдельный файл
 ```
 
-### 3.4 lvcook — проверка и упаковка контента
+### 3.3 lvcook — проверка и упаковка контента
 
 Ошибка в любом `.lvs` всплывает только в рантайме, поэтому в CI контент
 прогоняется через парсер и компилятор отдельной утилитой:
@@ -186,6 +225,9 @@ lvrun script.lvs                               # отдельный файл
 ```bash
 lvcook check                                   # stdlib/ и templates/ (код возврата 1 при ошибке)
 lvcook check templates/rpg_3p --quiet          # один шаблон, только ошибки
+lvcook compile                                 # скомпилировать всё в кэш .lvcache/*.lvc
+lvcook compile templates/rpg_3p --cache-dir .lvcache
+lvcook clean                                   # очистить кэш байткода
 lvcook bundle templates/farming_iso -o dist/farming.lvs   # один файл для дистрибуции
 lvcook list                                    # шаблоны и их stdlib-зависимости
 ```
@@ -196,11 +238,41 @@ lvcook list                                    # шаблоны и их stdlib-�
 номера строк в трейсбеках совпадали с исходниками. Полученный файл исполняется
 `lvrun` напрямую.
 
-> Кэш байткода `.lvc` (контейнер `BytecodeModule` в `engine/lvscript/Bytecode.h`)
-> объявлен, но его `serialize`/`deserialize` ещё не реализованы, поэтому
-> `lvcook` пока не пишет `.lvc` — только проверяет компилируемость.
+### 3.4 Кэш байткода (`.lvc`)
 
-### 3.3 Контракт шаблона
+`lvcook compile` прогоняет исходники через компилятор и сохраняет байткод в
+`.lvcache/` рядом с проектом. Кэш экономит полный проход лексер → парсер →
+компилятор при каждом запуске редактора; на `stdlib/` и трёх шаблонах он даёт
+26 модулей и занимает на 30–50 % меньше исходников.
+
+```cpp
+lv::BytecodeCache cache(".lvcache");
+if (auto cached = cache.load(vm, path, sourceText)) {
+    vm.execute(cached->entry);            // компиляция пропущена
+} else {
+    ObjFunction* fn = compiler.compile(module, diags);
+    lv::BytecodeModule m; m.entry = fn; m.name = path.string();
+    cache.store(vm, path, sourceText, m); // ошибки записи не фатальны
+}
+```
+
+Валидность кэша определяется двумя условиями: версия формата
+(`kBytecodeVersion`) и FNV-1a хэш **текста** исходника. Хэш содержимого выбран
+вместо `mtime` намеренно — он переживает `git checkout` и корректно работает в
+CI, где у всех файлов одинаковое время модификации.
+
+Что попадает в `.lvc`: прототипы функций, пул констант, таблица строк, таблица
+номеров строк и собственная **таблица имён модуля**. Последняя обязательна:
+операнды инструкций кодируют имена как индексы в `VM::names()`, а этот порядок
+различается между экземплярами VM — при загрузке индексы переотображаются в
+таблицу целевой машины.
+
+Что НЕ попадает: классы, инстансы, замыкания, корутины и нативные функции. Это
+рантайм-объекты; в кэше лежит байткод, который их создаёт, а сами объекты
+появляются при исполнении верхнего уровня модуля — ровно как при горячей
+перезагрузке.
+
+### 3.5 Контракт шаблона
 
 Каждый шаблон обязан предоставлять:
 
@@ -401,7 +473,7 @@ parallelForRange(0, n, 256, [&](int lo, int hi) { /* чанк */ });
 | Панели без окна | `limvine-editor --dump-panels [template] [--frames N]` |
 | Профилировщик VM | `vm.setProfiling(true)` → `profile_.instructions/calls/returns` |
 | Wireframe физики | `PhysicsWorld::collectDebugLines(out, color)` |
-| Все self-test'ы | `bash build_tests.sh` (10 сьютов, 294 проверки, headless) |
+| Все self-test'ы | `bash build_tests.sh` (12 сьютов, 413 проверок, headless) |
 
 > На машинах с 1–2 ГБ ОЗУ линковка тяжёлых сьютов с `-O2` может упасть без
 > сообщения (collect2/ld). В `build_tests.sh` для них используется `-O1`

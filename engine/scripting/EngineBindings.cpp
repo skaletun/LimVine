@@ -138,9 +138,10 @@ Value readField(VM& vm, const void* base, const FieldBinding& f) {
             return m;
         }
         case FieldBinding::Kind::String: {
-            // Строковые поля компонент редки; поддерживаем std::string.
-            std::string s; std::memcpy(&s, p, sizeof(std::string));
-            return vm.internString(s);
+            // Строковые поля компонент редки; поддерживаем std::string через
+            // вызов копирующего конструктора (не memcpy: у SSO-строк это UB).
+            const auto* sp = reinterpret_cast<const std::string*>(p);
+            return vm.internString(*sp);
         }
     }
     return Value::nil();

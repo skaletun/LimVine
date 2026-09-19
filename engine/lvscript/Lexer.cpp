@@ -128,7 +128,7 @@ const char* tokenName(Tok t) noexcept {
         case Tok::Tilde: return "'~'";
         case Tok::Shl: return "'<<'";
         case Tok::Shr: return "'>>'";
-        case Tok::QuestionQuestion: return "'??'";
+        case Tok::QuestionQuestion: return "'?" "?'";
         case Tok::QuestionColon: return "'?:'";
         case Tok::QuestionDot: return "'?.'";
         case Tok::At: return "'@'";
@@ -369,10 +369,6 @@ Token Lexer::readInterpolated(DiagnosticList& diags, SourceLoc start) {
 Token Lexer::readIdentifierOrKeyword() {
     SourceLoc loc{line_, col_, static_cast<std::uint32_t>(pos_)};
     const std::size_t start = pos_;
-    auto isIdStart = [](char c) {
-        return std::isalpha(static_cast<unsigned char>(c)) || c == '_' ||
-               static_cast<unsigned char>(c) >= 0x80; // UTF-8
-    };
     auto isIdCont = [](char c) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
                static_cast<unsigned char>(c) >= 0x80;

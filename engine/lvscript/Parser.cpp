@@ -51,14 +51,6 @@ std::optional<CompoundOp> compoundFor(Tok k) {
     }
 }
 
-bool isKeywordish(Tok k) {
-    return k == Tok::KwIf || k == Tok::KwWhile || k == Tok::KwFor || k == Tok::KwMatch ||
-           k == Tok::KwReturn || k == Tok::KwBreak || k == Tok::KwContinue ||
-           k == Tok::KwLet || k == Tok::KwVar || k == Tok::KwFunc || k == Tok::KwClass ||
-           k == Tok::KwImport || k == Tok::KwYield || k == Tok::KwResume ||
-           k == Tok::KwCoroutine || k == Tok::KwTry;
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
