@@ -397,6 +397,71 @@ auto overlaps  = physics.overlapSphere(center, radius);
 целое число подшагов `fixedStep_`; `maxSubSteps_` защищает от «спирали смерти»
 на просадках FPS (долг сбрасывается).
 
+### 5.1 Бэкенды физики
+
+`PhysicsWorld` не реализует симуляцию сам — он делегирует её объекту
+`IPhysicsBackend` (`engine/physics/backends/`):
+
+| Бэкенд | Файл | Когда используется |
+|---|---|---|
+| `BuiltinBackend` | `backends/BuiltinBackend.cpp` | всегда доступен; детерминированный AABB-солвер без внешних зависимостей |
+| `JoltBackend` | `backends/JoltBackend.cpp` | при сборке с `LV_WITH_JOLT`; настоящий Jolt Physics 5.x |
+
+```cpp
+physics.init(4096, /*preferJolt=*/true);   // откатится на builtin, если Jolt не собран
+physics.backendName();                     // "builtin" | "jolt"
+physics.usesJolt();                        // реально активный движок, а не пожелание
+```
+
+В `Physics.cpp` **нет ни одного `#ifdef`**: вся условная компиляция собрана в
+фабрике `createPhysicsBackend()` и в самом `JoltBackend.cpp`. В `PhysicsWorld`
+остаётся то, что одинаково для любого движка — синхронизация `Transform ↔ тело`,
+аккумулятор фиксированного шага и буфер контактов.
+
+**Оба бэкенда проходят один и тот же контракт** (`tests/physics_tests.cpp`,
+60 проверок × число доступных бэкендов). Проверки сформулированы как
+физические инварианты (тело не проваливается сквозь пол, маска соблюдается,
+энергия не растёт), а не как сверка с конкретными числами: интеграторы у
+движков разные, и требовать побитового совпадения было бы неверно. Этот
+контракт сразу нашёл шесть расхождений во встроенном симуляторе — неявный
+«пол» на `y=0`, нормаль луча, направленную внутрь тела, неработавший фильтр
+по маске в `raycast`/`overlapSphere` и отсутствие валидации вырожденных форм.
+
+**Семантика маски запроса** едина для обоих: `mask` — битовый набор *групп*
+(тело видно, если взведён бит `1 << group`), а `BodyDesc::mask` описывает, с
+чем тело сталкивается. Раньше встроенный бэкенд путал эти два поля, и фильтр
+в `raycast` молча не работал.
+
+#### Подключение Jolt
+
+```bash
+cmake -B build -DLV_WITH_JOLT=ON -DLV_JOLT_SOURCE_DIR=/путь/к/JoltPhysics
+cmake -B build -DLV_WITH_JOLT=ON -DJolt_DIR=/путь/к/lib/cmake/Jolt
+```
+
+> **Важно.** Jolt проверяет в рантайме, что клиентский код собран с тем же
+> набором макросов (`JPH_CROSS_PLATFORM_DETERMINISTIC`, `JPH_PROFILE_ENABLED`,
+> `JPH_DEBUG_RENDERER`, `JPH_OBJECT_STREAM`, набор SIMD). При несовпадении
+> процесс падает с `Mismatching define ...`, потому что раскладка структур
+> различается. Импортированная цель CMake приносит эти макросы через
+> `INTERFACE_COMPILE_DEFINITIONS`, поэтому рассинхронизация невозможна; в
+> `build_tests.sh` тот же набор задаётся переменной `JOLT_DEFS`.
+
+Решения внутри `JoltBackend`:
+
+* **Слои.** Ровно два object layer (`NON_MOVING`/`MOVING`), отображённых 1:1 на
+  broad-phase-слои. Игровая матрица 16×16 применяется выше — в
+  `ContactListener::OnContactValidate`. Иначе понадобилась бы комбинаторика из
+  сотен слоёв Jolt.
+* **Контакты** приходят из рабочих потоков солвера, поэтому копятся в буфер под
+  мьютексом и выдаются в `step()`.
+* **Кинематика** двигается через `MoveKinematic`, а не телепортом, — иначе она
+  не генерирует контакты и проталкивает тела сквозь себя.
+* **TriangleMesh** не может быть динамическим (у произвольной сетки нет тензора
+  инерции) — такое тело принудительно становится статическим, а не отвергается.
+* `RegisterDefaultAllocator`/`Factory`/`RegisterTypes` выполняются ровно один раз
+  на процесс, сколько бы `PhysicsWorld` ни создавалось.
+
 ---
 
 ## 6. Ввод
@@ -525,7 +590,7 @@ parallelForRange(0, n, 256, [&](int lo, int hi) { /* чанк */ });
 | Панели без окна | `limvine-editor --dump-panels [template] [--frames N]` |
 | Профилировщик VM | `vm.setProfiling(true)` → `profile_.instructions/calls/returns` |
 | Wireframe физики | `PhysicsWorld::collectDebugLines(out, color)` |
-| Все self-test'ы | `bash build_tests.sh` (15 сьютов, 647 проверок, headless) |
+| Все self-test'ы | `bash build_tests.sh` (16 сьютов, 707 проверок, headless; с Jolt — 767) |
 
 > На машинах с 1–2 ГБ ОЗУ линковка тяжёлых сьютов с `-O2` может упасть без
 > сообщения (collect2/ld). В `build_tests.sh` для них используется `-O1`

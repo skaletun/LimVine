@@ -1,6 +1,6 @@
 /**
  * @file    Physics.h
- * @brief   Обёртка над Jolt Physics с ECS-интеграцией.
+ * @brief   Физический мир с ECS-интеграцией поверх сменного бэкенда.
  * @ingroup Physics
  *
  * @details Выбор Jolt, а не Bullet:
@@ -9,10 +9,17 @@
  *          - multicore solver из коробки — согласуется с Job System движка;
  *          - активное сопровождение и современная C++-кодовая база.
  *
- *          Обёртка спроектирована так, чтобы @c LV_WITH_JOLT можно было
- *          выключить: тогда используется встроенный простой симулятор
- *          (сферы/бокс-коллизии + raycast по AABB), на котором работают тесты,
- *          CI и headless-сервер.
+ *          Сама симуляция вынесена за @c IPhysicsBackend
+ *          (@c backends/PhysicsBackend.h). Доступны две реализации:
+ *
+ *          - @c JoltBackend — настоящий Jolt 5.x, включается @c LV_WITH_JOLT;
+ *          - @c BuiltinBackend — детерминированный AABB-солвер без внешних
+ *            зависимостей: тесты, CI, headless-сервер и реплеи.
+ *
+ *          Оба обязаны вести себя одинаково с точки зрения игрового кода, и
+ *          это проверяется общим контрактным сьютом @c tests/physics_tests.cpp.
+ *          Поэтому в @c Physics.cpp нет ни одного @c #ifdef: выбор делается
+ *          один раз фабрикой @c createPhysicsBackend().
  */
 #pragma once
 
@@ -21,7 +28,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lv::physics {
@@ -111,7 +120,14 @@ public:
     PhysicsWorld();
     ~PhysicsWorld();
 
-    bool init(std::uint32_t maxBodies = 8192);
+    /**
+     * @brief Инициализация.
+     * @param maxBodies  Верхняя граница числа тел (Jolt требует её заранее).
+     * @param preferJolt Просить Jolt-бэкенд. Если движок собран без
+     *                   @c LV_WITH_JOLT, молча используется встроенный
+     *                   симулятор — игра запускается в любом случае.
+     */
+    bool init(std::uint32_t maxBodies = 8192, bool preferJolt = true);
     void shutdown();
 
     /// Шаг симуляции с фиксированным dt и аккумулятором (см. step()).
@@ -134,6 +150,15 @@ public:
      */
     void teleportBody(BodyId id, const Vec3& pos, const Quat& rot);
     [[nodiscard]] Vec3 linearVelocity(BodyId id) const;
+
+    /// Текущее положение тела по данным физики (не из Transform).
+    [[nodiscard]] Vec3 position(BodyId id) const;
+    /// Текущий поворот тела по данным физики.
+    [[nodiscard]] Quat rotation(BodyId id) const;
+    /// Тип тела (Static/Kinematic/Dynamic).
+    [[nodiscard]] BodyKind kindOf(BodyId id) const;
+    /// Сущность, привязанная к телу, или @c ecs::kNullEntity.
+    [[nodiscard]] ecs::Entity entityOf(BodyId id) const;
     void applyImpulse(BodyId id, const Vec3& impulse, const Vec3& atWorldPos);
     void applyForce(BodyId id, const Vec3& force);
     void setKinematicTarget(BodyId id, const Vec3& pos, const Quat& rot);
@@ -144,7 +169,7 @@ public:
     [[nodiscard]] std::vector<BodyId> overlapSphere(const Vec3& center, Real radius, std::uint16_t mask = 0xFFFF) const;
 
     /// Гравитация.
-    void setGravity(const Vec3& g) noexcept { gravity_ = g; }
+    void setGravity(const Vec3& g);
     [[nodiscard]] const Vec3& gravity() const noexcept { return gravity_; }
 
     /// Матрица коллизий.
@@ -161,7 +186,10 @@ public:
 
     /// Статистика.
     [[nodiscard]] std::size_t bodyCount() const noexcept;
+    /// Работает ли реальный Jolt (а не встроенный симулятор).
     [[nodiscard]] bool usesJolt() const noexcept { return joltActive_; }
+    /// Имя активного бэкенда: "builtin" | "jolt".
+    [[nodiscard]] const char* backendName() const noexcept;
 
     /// Отладочная геометрия (линии) — для гизмо в редакторе.
     void collectDebugLines(std::vector<Vec3>& outLines, const Color& color) const;
@@ -169,11 +197,12 @@ public:
 private:
     void syncFromECS(ecs::World& world);
     void syncToECS(ecs::World& world);
-    void integrate(float dt);
 
-    struct Body;
-    std::vector<std::unique_ptr<Body>> bodies_;
-    std::vector<BodyId> freeList_;
+    /// Активный бэкенд (встроенный симулятор или Jolt). Трансляция ECS,
+    /// аккумулятор фиксированного шага и события контактов одинаковы для
+    /// обоих, поэтому живут здесь, а не дублируются в реализациях.
+    std::unique_ptr<class IPhysicsBackend> backend_;
+
     Vec3 gravity_{0, -9.81f, 0};
     CollisionMatrix matrix_;
     std::vector<ContactEvent> contacts_;

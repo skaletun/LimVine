@@ -33,9 +33,14 @@ limvine/
 │   │   ├── GraphicsAPI.h/.cpp  #   интерфейс + NullGraphicsAPI (LV_WITH_VULKAN / _OPENGL)
 │   │   └── Renderer.h/.cpp     #   пайплайн кадра, камера, отладочные линии
 │   ├── physics/
-│   │   └── Physics.h/.cpp      #   обёртка Jolt (LV_WITH_JOLT) + встроенный
-│   │                             #   детерминированный симулятор (AABB, raycast,
-│   │                             #   overlapSphere, фикс. шаг, матрица коллизий 16×16)
+│   │   ├── Physics.h/.cpp      #   PhysicsWorld: ECS-синхронизация, фиксированный
+│   │   │                         #   шаг, матрица коллизий 16×16. Без #ifdef —
+│   │   │                         #   симуляция делегируется бэкенду
+│   │   └── backends/
+│   │       ├── PhysicsBackend.h    # интерфейс IPhysicsBackend + фабрика
+│   │       ├── PhysicsBackend.cpp  # единственное место выбора реализации
+│   │       ├── BuiltinBackend.h/.cpp # детерминированный AABB-солвер без зависимостей
+│   │       └── JoltBackend.h/.cpp    # настоящий Jolt Physics 5.x (LV_WITH_JOLT)
 │   ├── input/
 │   │   └── Input.h/.cpp        #   Input Mapping Contexts: стек контекстов с
 │   │                             #   приоритетами, клавиши/мышь/геймпад как оси,

@@ -9,8 +9,34 @@ OUT=${OUT:-/tmp/limvine-tests}
 mkdir -p "$OUT"
 
 ENGINE_SRC=$(ls engine/lvscript/*.cpp engine/ecs/*.cpp engine/core/*.cpp engine/physics/*.cpp \
+                  engine/physics/backends/*.cpp \
                   engine/input/*.cpp engine/audio/*.cpp engine/render/*.cpp engine/scripting/*.cpp \
-                  engine/scripting/visual/*.cpp engine/asset/*.cpp 2>/dev/null)
+                  engine/scripting/visual/*.cpp engine/asset/*.cpp engine/scene/*.cpp 2>/dev/null)
+
+# --- Необязательный бэкенд Jolt Physics -------------------------------------
+# Если указан JOLT_ROOT (исходники) и JOLT_LIB (собранная libJolt.a), тесты
+# физики дополнительно прогоняются на настоящем Jolt. Без них собирается
+# только встроенный симулятор — ни одна проверка при этом не пропадает,
+# набор contract-тестов просто исполняется один раз вместо двух.
+JOLT_FLAGS=""
+JOLT_LIBS=""
+if [ -n "${JOLT_ROOT:-}" ] && [ -n "${JOLT_LIB:-}" ] && [ -f "$JOLT_LIB" ]; then
+  # ВНИМАНИЕ: Jolt проверяет в рантайме, что клиент собран с ТЕМ ЖЕ набором
+  # дефайнов, что и сама библиотека, иначе аварийно завершается с
+  # «Mismatching define ...» (структуры имеют разную раскладку). Значения по
+  # умолчанию соответствуют сборке Jolt в конфигурации Release со штатными
+  # опциями CMake; при другой конфигурации передайте свой JOLT_DEFS.
+  JOLT_DEFS=${JOLT_DEFS:-"-DNDEBUG -DJPH_CROSS_PLATFORM_DETERMINISTIC -DJPH_USE_CPU_COMPUTE \
+    -DJPH_DEBUG_RENDERER -DJPH_PROFILE_ENABLED -DJPH_OBJECT_STREAM \
+    -DJPH_USE_AVX2 -DJPH_USE_AVX -DJPH_USE_SSE4_1 -DJPH_USE_SSE4_2 \
+    -DJPH_USE_LZCNT -DJPH_USE_TZCNT -DJPH_USE_F16C \
+    -mavx2 -mbmi -mpopcnt -mlzcnt -mf16c -mfpmath=sse"}
+  JOLT_FLAGS="-DLV_WITH_JOLT -I$JOLT_ROOT $JOLT_DEFS"
+  JOLT_LIBS="$JOLT_LIB"
+  printf '>>> Jolt Physics: ON (%s)\n' "$JOLT_LIB"
+else
+  printf '>>> Jolt Physics: OFF (задайте JOLT_ROOT и JOLT_LIB, чтобы включить)\n'
+fi
 
 # Интеграционный тест линкует ВСЕ подсистемы в один TU-набор: на машинах с
 # 1-2 ГБ ОЗУ -O2 может не хватить памяти для линковщика, поэтому для него
@@ -68,6 +94,17 @@ run_suite scene_tests tests/scene_tests.cpp $ENGINE_SRC
 # Проверяется поведение (нормализация диагонали, гравитация, угол обзора,
 # перекрытие стеной), а не факт компиляции.
 run_suite gameplay_tests tests/gameplay_tests.cpp $ENGINE_SRC
+
+# Физика: контрактный набор, который прогоняется на КАЖДОМ доступном бэкенде
+# (встроенный симулятор и, если собрано с Jolt, настоящий Jolt). Так
+# расхождения между реализациями ловятся в CI, а не в игре.
+printf '\n>>> building physics_tests\n'
+if ! $CXX $FLAGS_LINK_HEAVY $JOLT_FLAGS -o "$OUT/physics_tests" tests/physics_tests.cpp $ENGINE_SRC $JOLT_LIBS; then
+  printf '!!! BUILD FAILED: physics_tests\n'; FAILURES=$((FAILURES+1))
+else
+  printf '>>> running  physics_tests\n'
+  if ! "$OUT/physics_tests"; then printf '!!! SUITE FAILED: physics_tests\n'; FAILURES=$((FAILURES+1)); fi
+fi
 
 run_suite engine_integration_tests tests/engine_integration_tests.cpp $ENGINE_SRC
 
