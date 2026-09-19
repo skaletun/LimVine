@@ -1,0 +1,53 @@
+# ============================================================================
+#  Third-Person RPG — квесты
+#
+#  Квесты описаны ДАННЫМИ (цель = тип + параметр + количество), поэтому одно и
+#  то же игровое событие продвигает любой квест: боевая система просто шлёт
+#  QuestLog.notify("kill", "wolf", 1), не зная, кто и зачем слушает.
+# ============================================================================
+
+class QuestSetup do
+    var log                   # QuestLog (stdlib/quest.lvs)
+
+    func init() do
+        this.log = new QuestLog()
+        this.build()
+    end
+
+    func build() do
+        # --- Основной квест: волки ------------------------------------------
+        let wolves = new Quest("wolves", "Wolves of the Ridge", "Thin out the wolf pack east of the village.")
+        wolves.objective("kill", "wolf", 2, "Slay 2 wolves")
+        wolves.rewards = {"xp": 150, "gold": 40, "items": ["iron_sword"]}
+        wolves.nextQuest = "smith_reward"
+        this.log.register(wolves)
+
+        # --- Цепочка: награда кузнеца ---------------------------------------
+        let reward = new Quest("smith_reward", "A Blade Owed", "The smith promised you a blade.")
+        reward.objective("talk", "smith", 1, "Speak with the smith")
+        this.log.register(reward)
+
+        # --- Побочный: исследование карты -----------------------------------
+        let explore = new Quest("explore", "Four Corners", "Walk to the far corners of the valley.")
+        explore.objective("visit", "east_gate", 1, "Reach the eastern fence")
+        explore.objective("visit", "west_gate", 1, "Reach the western fence")
+        this.log.register(explore)
+        return this.log
+    end
+
+    /// Игровое событие -> квесты. Единая точка входа для всех систем.
+    func notify(kind: String, target: String, amount: Int = 1) do
+        return this.log.notify(kind, target, amount)
+    end
+
+    /// Текст журнала для HUD/консоли.
+    func journalText() -> String do
+        var out = ""
+        # QuestLog.journal() возвращает только АКТИВНЫЕ квесты:
+        # {id, title, progress}. Завершённые видны через isCompleted().
+        for q in this.log.journal() do
+            out = out + q["title"] + " " + q["progress"] + "\n"
+        end
+        return out
+    end
+end

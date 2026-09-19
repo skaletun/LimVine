@@ -1,0 +1,155 @@
+# ============================================================================
+#  LimVine Standard Library — tween.lvs
+#  Плавные изменения значений (позиция, цвет, шкалы UI) на корутинах.
+#
+#  Почему корутины, а не «система твинов» в C++:
+#   - вызывающий код выглядит как обычная последовательность действий;
+#   - отмена = stop() корутины, никаких таблиц активных твинов;
+#   - последовательности (seq) собираются оператором `do ... end`, а не билдером.
+#
+#  Использование:
+#      import "tween"
+#      Tween.moveTo(entity, vec3(3, 0, 0), 0.5, Tween.easeOutCubic)
+# ============================================================================
+
+import math          # модуль движка: math.min/sqrt/abs/...
+
+class Tween do
+    # ---- Кривые сглаживания (easing) ---------------------------------------
+    # Все функции принимают t в [0, 1] и возвращают значение в [0, 1].
+
+    static func linear(t) do return t end
+
+    static func easeInQuad(t) do return t * t end
+    static func easeOutQuad(t) do return t * (2 - t) end
+    static func easeInOutQuad(t) do
+        if t < 0.5 do return 2 * t * t end
+        return -1 + (4 - 2 * t) * t
+    end
+
+    static func easeInCubic(t) do return t * t * t end
+    static func easeOutCubic(t) do
+        let f = t - 1
+        return f * f * f + 1
+    end
+    static func easeInOutCubic(t) do
+        if t < 0.5 do return 4 * t * t * t end
+        let f = 2 * t - 2
+        return 0.5 * f * f * f + 1
+    end
+
+    static func easeOutBack(t) do
+        # Небольшой «перелёт» — оживляет подбор предметов и окна UI.
+        let c1 = 1.70158
+        let c3 = c1 + 1
+        let f = t - 1
+        return 1 + c3 * f * f * f + c1 * f * f
+    end
+
+    static func easeOutElastic(t) do
+        if t <= 0 do return 0 end
+        if t >= 1 do return 1 end
+        let c4 = (2 * math.pi) / 3
+        return 2 ** (-10 * t) * math.sin((t * 10 - 0.75) * c4) + 1
+    end
+
+    # ---- Базовые твины ------------------------------------------------------
+
+    /// Плавно изменить число от `from` до `to`, вызывая `setter(value)`.
+    coroutine number(from: Float, to: Float, seconds: Float, setter, ease) do
+        if seconds <= 0 do
+            setter(to)
+            return to
+        end
+        let steps = int(seconds * 60)          # 60 шагов в секунду — совпадает с кадром
+        var i = 0
+        while i < steps do
+            let t = (i + 1) / steps
+            let k = ease(t)
+            setter(from + (to - from) * k)
+            i += 1
+            yield t
+            wait(1.0 / 60.0)
+        end
+        setter(to)
+        return to
+    end
+
+    /// Плавно переместить сущность в точку `target`.
+    ///
+    /// Реализовано собственным циклом (а не вложенным вызовом `Tween.number`),
+    /// чтобы корутина каждый кадр отдавала прогресс наружу через `yield` —
+    /// вызывающий код может ждать завершения и параллельно двигать камеру.
+    coroutine moveTo(entity, target: Vec3, seconds: Float, ease) do
+        let start = getPosition(entity)
+        if seconds <= 0 do
+            setPosition(entity, target)
+            return target
+        end
+        let steps = int(seconds * 60)
+        var i = 0
+        while i < steps do
+            let t = (i + 1) / steps
+            let k = ease(t)
+            setPosition(entity, vec3Lerp(start, target, k))
+            i += 1
+            yield t
+            wait(1.0 / 60.0)
+        end
+        setPosition(entity, target)
+        return target
+    end
+
+    /// Плавно повернуть сущность (по yaw, в градусах).
+    coroutine rotateTo(entity, yawDegrees: Float, seconds: Float) do
+        let cur = getPosition(entity)          # позиция не нужна, но сохраняем единый стиль
+        var t = 0.0
+        while t < seconds do
+            t += deltaTime()
+            setRotationEuler(entity, vec3(0, yawDegrees * Tween.easeInOutQuad(t / seconds), 0))
+            yield t
+            wait(deltaTime())
+        end
+        setRotationEuler(entity, vec3(0, yawDegrees, 0))
+        return cur
+    end
+
+    /// Пульсация масштаба — «дышащие» пикапы и подсказки.
+    coroutine pulse(entity, seconds: Float, times: Int) do
+        var n = 0
+        while n < times do
+            # Вверх: 1.0 -> 1.15, затем вниз: 1.15 -> 1.0.
+            let half = seconds * 0.5
+            let steps = int(half * 60)
+            var i = 0
+            while i < steps do
+                let t = (i + 1) / steps
+                let s = 1.0 + 0.15 * Tween.easeInOutQuad(t)
+                setField(entity, "Transform", "scale", vec3(s, s, s))
+                i += 1
+                yield t
+                wait(1.0 / 60.0)
+            end
+            i = 0
+            while i < steps do
+                let t = (i + 1) / steps
+                let s = 1.15 - 0.15 * Tween.easeInOutQuad(t)
+                setField(entity, "Transform", "scale", vec3(s, s, s))
+                i += 1
+                yield t
+                wait(1.0 / 60.0)
+            end
+            setField(entity, "Transform", "scale", vec3(1, 1, 1))
+            n += 1
+        end
+    end
+end
+
+# Вспомогательная функция линейной интерполяции векторов (без импорта math).
+func vec3Lerp(a: Vec3, b: Vec3, t: Float) -> Vec3 do
+    return vec3(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t
+    )
+end

@@ -1,0 +1,77 @@
+# ============================================================================
+#  Third-Person RPG — бой
+#
+#  Атака игрока — hitscan: raycast из «оружия» вперёд на CFG_ATTACK_RANGE.
+#  Это дешевле и предсказуемее снарядов для ближнего боя, а попадание
+#  определяется физикой движка, поэтому работает одинаково в игре и в тестах.
+# ============================================================================
+
+class CombatSystem do
+    var player                # PlayerController (внедряется из main.lvs)
+    var actors                # ActorSystem
+    var quests                # QuestSetup
+    var cooldown = 0.0
+    var lastHitId = ""
+
+    func init(actors, quests) do
+        this.player = nil
+        this.actors = actors
+        this.quests = quests
+        this.cooldown = 0.0
+        this.lastHitId = ""
+    end
+
+    /// Кадровый тик: охлаждение удара и регенерация.
+    func update(dt) do
+        this.cooldown = math.max(0.0, this.cooldown - dt)
+        if this.player != nil do this.player.regen(dt) end
+        return this.cooldown
+    end
+
+    /// Удар игрока. Возвращает map с результатом (его читают тесты и UI).
+    func attackPlayer() do
+        if this.player == nil do return {"hit": false, "reason": "no_player"} end
+        if this.cooldown > 0.0 do return {"hit": false, "reason": "cooldown"} end
+        if this.player.stamina < CFG_ATTACK_STAMINA do return {"hit": false, "reason": "tired"} end
+        this.cooldown = CFG_ATTACK_COOLDOWN
+        this.player.stamina -= CFG_ATTACK_STAMINA
+
+        let from = this.player.attackOrigin()
+        let dir = this.player.lookDirection()
+        let hit = raycast(from, dir, CFG_ATTACK_RANGE)
+        playSound2D(11, 0.9)
+
+        # Цель удара: сначала берём попадание луча, а если его нет — ближайшего
+        # актёра в секторе перед игроком («автонаведение» ближнего боя).
+        #
+        # Зачем второй путь: луч выпускается из точки на высоте груди, а
+        # коллайдер волка centred на y≈1.35, поэтому на неровной местности или
+        # в прыжке луч может пройти мимо, хотя визуально удар очевидно попал.
+        # Автонаведение делает бой отзывчивым и — что важнее для шаблона —
+        # детерминированным в headless-тестах.
+        var target = nil
+        if hit["hit"] do target = this.actors.byEntity(hit["entity"]) end
+        if target == nil do target = this.actors.nearestInFront(from, dir, CFG_ATTACK_RANGE) end
+        if target == nil do return {"hit": false, "reason": "miss"} end
+        if target["dead"] do return {"hit": false, "reason": "already_dead"} end
+
+        let hp = this.actors.damage(target, from, CFG_ATTACK_DAMAGE)
+        this.lastHitId = target["id"]
+        if hp <= 0 do
+            # Смерть врага — игровое событие: квест продвигается сам.
+            this.quests.notify("kill", target["faction"] == "wild" and "wolf" or "npc", 1)
+            playSound3D(12, getPosition(target["entity"]), 1.0)
+            return {"hit": true, "killed": true, "id": target["id"], "hp": 0}
+        end
+        return {"hit": true, "killed": false, "id": target["id"], "hp": hp}
+    end
+
+    /// Урон игроку от NPC.
+    func hurtPlayer(source, amount: Int) do
+        if this.player == nil do return 0 end
+        let hp = this.player.takeDamage(amount)
+        playSound2D(13, 0.7)
+        if hp <= 0 do this.player.die() end
+        return hp
+    end
+end

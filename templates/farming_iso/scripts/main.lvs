@@ -1,0 +1,165 @@
+# ============================================================================
+#  Isometric Farming — точка входа
+#
+#  Здесь собирается «сцена»: подсистемы шаблона связываются между собой,
+#  объявляется раскладка ввода и глобальный `update(dt)`, который движок
+#  вызывает каждый кадр (конвенция ScriptWorld::dispatch).
+# ============================================================================
+
+# Инвентарь — модуль стандартной библиотеки (см. stdlib/inventory.lvs).
+# База предметов не нужна: семена и урожай описаны прямо в CROPS.
+global inv = new Inventory(12, nil)
+
+global farm = new FarmWorld()
+farm.build()
+
+global crops = new CropSystem(farm)
+
+global economy = new FarmEconomy(farm, inv, CFG_START_GOLD)
+economy.grantStartingSeeds()
+
+global farmer = new FarmPlayer(farm, crops, inv)
+
+/// Настройка ввода выполняется из скрипта: шаблон сам описывает свою раскладку.
+///
+/// Коды клавиш — числовые (GLFW-совместимые): A=65, D=68, W=87, S=83, E=69,
+/// Q=81, F=70, Space=32. Оси MoveX/MoveY дают -1/+1, поэтому изометрический
+/// поворот делается уже в FarmPlayer.move().
+func setupInput() do
+    createInputContext("Farm", 0)
+    mapKeyAxis("Farm", "MoveX", 65, -1.0)
+    mapKeyAxis("Farm", "MoveX", 68, 1.0)
+    mapKeyAxis("Farm", "MoveY", 83, -1.0)
+    mapKeyAxis("Farm", "MoveY", 87, 1.0)
+    mapKey("Farm", "Interact", 69)      # E — вспахать/посадить/полить/собрать
+    mapKey("Farm", "NextSeed", 81)      # Q — следующая культура
+    mapKey("Farm", "PrevSeed", 84)      # T — предыдущая
+    mapKey("Farm", "Ship", 70)          # F — отгрузить (нужно стоять у ящика)
+    mapKey("Farm", "Sleep", 32)         # Space — закончить день
+    pushInputContext("Farm")
+    return true
+end
+setupInput()
+
+/// Кадровый обработчик: его вызывает движок (ScriptWorld::tick -> dispatch).
+func update(dt) do
+    crops.update(dt)
+    crops.updateAnims(dt)
+    farmer.update(dt)
+
+    if inputPressed("Ship") do
+        let earned = economy.ship(farmer.ent)
+        if earned >= 0 do print("[ship] +{earned} gold, total {economy.gold}") end
+    end
+
+    # День меняется по часам ИЛИ по кнопке «спать».
+    var newDay = farm.advanceTime(dt)
+    if inputPressed("Sleep") do
+        farm.timeOfDay = CFG_DAY_SECONDS      # договорить день до конца
+        newDay = true
+    end
+    if newDay do
+        let s = economy.closeDay()
+        crops.onNewDay()
+        farmer.sleep()
+        # Внутри {} интерполяции нельзя использовать другие фигурные скобки и
+        # кавычки того же типа, поэтому значения сначала раскладываем в локалы.
+        let d = s["day"]
+        let earned = s["earned"]
+        let shipped = s["shipped"]
+        let gold = s["gold"]
+        print("[day {d}] earned {earned}, shipped {shipped}, gold {gold}")
+        print("[hud] " + economy.hudText(crops.readyCount()))
+    end
+    return dt
+end
+
+/// Состояние шаблона одной map'ой — его читают тесты и консоль редактора.
+func templateState() do
+    return {
+        "day": farm.day,
+        "gold": economy.gold,
+        "entities": entityCount(),
+        "plots": farm.plots.len(),
+        "ready": crops.readyCount(),
+        "energy": farmer.energy,
+        "action": farmer.lastAction,
+        "seeds_turnip": inv.countOf("seed_turnip"),
+        "turnips": inv.countOf("turnip"),
+        "playerX": getPosition(farmer.ent).x,
+        "playerZ": getPosition(farmer.ent).z,
+    }
+end
+
+let plotsBuilt = farm.plots.len()
+let startGold = economy.gold
+let startSeeds = inv.countOf("seed_turnip")
+print("[farming_iso] world built: {plotsBuilt} plots, gold {startGold}, seeds {startSeeds}")
+
+# ============================================================================
+#  Тестовые хуки
+#
+#  Тонкие обёртки над игровой логикой: они нужны, чтобы тесты
+#  (tests/template_tests.cpp) и консоль редактора могли дёргать конкретные
+#  действия, не эмулируя ввод по кадрам. Внутри — ТОЛЬКО вызовы тех же методов,
+#  что использует gameplay-код, поэтому тест проверяет настоящую логику, а не
+#  отдельную «тестовую» реализацию.
+# ============================================================================
+
+func testTill(gx, gz) -> Bool do
+    let plot = farm.plotAt(gx, gz)
+    if plot == nil do return false end
+    plot["tilled"] = true
+    farm.refreshPlotTint(plot)
+    return true
+end
+
+func testPlant(gx, gz) -> Bool do
+    let plot = farm.plotAt(gx, gz)
+    if plot == nil do return false end
+    # Семя списывается так же, как при посадке кнопкой.
+    let id = farmer.selectedCrop()
+    if inv.countOf("seed_" + id) <= 0 do return false end
+    inv.remove("seed_" + id, 1)
+    return crops.plant(plot, id)
+end
+
+func testStage(gx, gz) -> Int do
+    let plot = farm.plotAt(gx, gz)
+    if plot == nil do return -1 end
+    return farm.stageOf(plot)
+end
+
+func testWater(gx, gz) -> Bool do return crops.water(farm.plotAt(gx, gz)) end
+
+func testHarvest(gx, gz) -> Int do
+    let plot = farm.plotAt(gx, gz)
+    if plot == nil do return 0 end
+    let cropId = plot["crop"]
+    let got = crops.harvest(plot)
+    if got > 0 and cropId != nil do inv.add(cropId, 1) end
+    return got
+end
+
+/// Отгрузка без проверки «стою ли у ящика»: в тесте телепортировать фермера
+/// было бы дороже, чем проверить экономику напрямую.
+func testShip() -> Int do
+    var earned = 0
+    for id in CROP_ORDER do
+        let have = inv.countOf(id)
+        if have <= 0 do continue end
+        earned += int(CROPS[id]["sellPrice"]) * have
+        inv.remove(id, have)
+    end
+    economy.gold += earned
+    economy.earnedToday += earned
+    economy.shippedToday += earned
+    return earned
+end
+
+func testSleep() do
+    farm.timeOfDay = CFG_DAY_SECONDS      # следующий advanceTime() закроет день
+    return true
+end
+
+func testBuySeeds(n: Int) -> Int do return economy.buySeed(farmer.selectedCrop(), n) end

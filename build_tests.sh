@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Сборка и запуск всех self-test'ов LimVine (без внешних зависимостей).
+set -u
+FAILURES=0
+cd "$(dirname "$0")"
+CXX=${CXX:-g++}
+FLAGS="-std=c++20 -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-result -pthread -Iengine"
+OUT=${OUT:-/tmp/limvine-tests}
+mkdir -p "$OUT"
+
+ENGINE_SRC=$(ls engine/lvscript/*.cpp engine/ecs/*.cpp engine/core/*.cpp engine/physics/*.cpp \
+                  engine/input/*.cpp engine/audio/*.cpp engine/render/*.cpp engine/scripting/*.cpp \
+                  engine/scripting/visual/*.cpp engine/asset/*.cpp 2>/dev/null)
+
+# Интеграционный тест линкует ВСЕ подсистемы в один TU-набор: на машинах с
+# 1-2 ГБ ОЗУ -O2 может не хватить памяти для линковщика, поэтому для него
+# используется -O1. На результат тестов это не влияет.
+FLAGS_LINK_HEAVY="-std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-result -pthread -Iengine"
+
+run_suite () {
+  local name="$1"; shift
+  printf '\n>>> building %s\n' "$name"
+  if ! $CXX $FLAGS_LINK_HEAVY -o "$OUT/$name" "$@"; then
+    printf '!!! BUILD FAILED: %s\n' "$name"; FAILURES=$((FAILURES+1)); return
+  fi
+  printf '>>> running  %s\n' "$name"
+  if ! "$OUT/$name"; then printf '!!! SUITE FAILED: %s\n' "$name"; FAILURES=$((FAILURES+1)); fi
+}
+
+simple_suite () {
+  local name="$1"; shift
+  printf '\n>>> building %s\n' "$name"
+  if ! $CXX $FLAGS -o "$OUT/$name" "$@"; then
+    printf '!!! BUILD FAILED: %s\n' "$name"; FAILURES=$((FAILURES+1)); return
+  fi
+  printf '>>> running  %s\n' "$name"
+  if ! "$OUT/$name"; then printf '!!! SUITE FAILED: %s\n' "$name"; FAILURES=$((FAILURES+1)); fi
+}
+
+# LV Script зависит только от自身 подсистемы — собираем отдельно, чтобы
+# ошибка в движке не мешала тестам языка.
+LV_SRC=$(ls engine/lvscript/*.cpp)
+simple_suite lvscript_tests  tests/lvscript_tests.cpp $LV_SRC
+simple_suite ecs_tests       tests/ecs_tests.cpp engine/ecs/Registry.cpp
+simple_suite render_tests    tests/render_tests.cpp engine/render/RenderTypes.cpp engine/render/Batcher.cpp engine/core/JobSystem.cpp
+simple_suite input_tests     tests/input_tests.cpp engine/input/Input.cpp
+simple_suite job_tests       tests/job_tests.cpp engine/core/JobSystem.cpp
+simple_suite visualscript_tests tests/visualscript_tests.cpp engine/scripting/visual/VisualScript.cpp engine/scripting/visual/JsonMini.cpp $LV_SRC
+# Стандартная библиотека LV Script (stdlib/*.lvs) проверяется отдельным сьютом:
+# он грузит модули из рабочего каталога, поэтому запускается из корня репозитория.
+simple_suite stdlib_tests    tests/stdlib_tests.cpp $LV_SRC
+
+run_suite engine_integration_tests tests/engine_integration_tests.cpp $ENGINE_SRC
+
+# Редактор: панели рисуются в TextUIDraw, поэтому ImGui не нужен.
+run_suite editor_tests tests/editor_tests.cpp $ENGINE_SRC engine/editor/Panels.cpp engine/editor/EditorUI.cpp
+
+# Шаблоны игр (templates/*) проверяются тем же headless-раннером, что используют
+# редактор и CLI (tools/lvrun): тест «играет» в каждый шаблон — вспашка/посадка/
+# рост/сбор урожая и смена дня; диалог -> квест -> бой и цепочка квестов;
+# стрельба с разбросом, перезарядка, пикапы и движение от настоящей клавиатуры.
+# Состояние читается через templateState(), а действия вызываются через
+# TemplateRunner::callGlobalFn/callMethodOnGlobal (без эмуляции ввода по кадрам).
+run_suite template_tests tests/template_tests.cpp $ENGINE_SRC
+
+printf '\n=========================================\n'
+if [ "$FAILURES" -eq 0 ]; then
+  printf 'ALL LIMVINE SELF-TESTS PASSED\n'
+  exit 0
+else
+  printf '%d SUITE(S) FAILED\n' "$FAILURES"
+  exit 1
+fi

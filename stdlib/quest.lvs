@@ -1,0 +1,175 @@
+# ============================================================================
+#  LimVine Standard Library — quest.lvs
+#  Квесты: стадии, цели, счётчики, награды и журнал.
+#
+#  Квест — данные, а не код: цели описываются парой (тип, параметр, количество),
+#  поэтому один и тот же обработчик событий движка («убит враг», «взят предмет»)
+#  продвигает любой квест. Это позволяет дизайнеру добавлять квесты без правки
+#  скриптов.
+# ============================================================================
+
+import math          # модуль движка: math.min/sqrt/abs/...
+
+class Objective do
+    var kind = "kill"        # kill | collect | visit | talk | custom
+    var target = ""          # id цели
+    var required = 1
+    var progress = 0
+    var description = ""
+    var optional = false
+
+    func init(kind: String, target: String, required: Int = 1, desc: String = "") do
+        this.kind = kind
+        this.target = target
+        // Без этой строки required оставался равным значению по умолчанию (1) и
+        # ЛЮБАЯ цель закрывалась с первого же события: квест «убей 5 крыс»
+        # завершался после одной крысы, а progressText() показывал 1/N.
+        this.required = required
+        this.description = desc
+    end
+
+    func done() -> Bool do return this.progress >= this.required end
+    func advance(n: Int = 1) do
+        if not this.done() do
+            this.progress = math.min(this.required, this.progress + n)
+        end
+        return this.done()
+    end
+    func ratio() -> String do return "{progress}/{required}" end
+end
+
+class Quest do
+    var id = ""
+    var title = ""
+    var description = ""
+    var giver = ""
+    var stage = 0
+    var objectives
+    var rewards
+    var nextQuest = nil           # id квеста, который откроется после завершения
+    var onStage = nil             # колбэк (quest, stage)
+    var onCompleted = nil         # колбэк (quest)
+
+    func init(id: String, title: String, desc: String = "") do
+        this.id = id
+        this.title = title
+        this.description = desc
+        // ВАЖНО: контейнеры-значения по умолчанию (`var objectives = []`)
+        // создаются ОДИН РАЗ — при определении класса, поэтому все экземпляры
+        // разделили бы один и тот же массив. Пересоздаём их на каждый инстанс.
+        this.objectives = []
+        this.rewards = {"xp": 0, "gold": 0, "items": []}
+    end
+
+    func objective(kind: String, target: String, required: Int = 1, desc: String = "") do
+        let o = new Objective(kind, target, required, desc)
+        this.objectives.push(o)
+        return o
+    end
+
+    /// Все ОБЯЗАТЕЛЬНЫЕ цели выполнены?
+    func completed() -> Bool do
+        for o in this.objectives do
+            if not o.optional and not o.done() do return false end
+        end
+        return len(this.objectives) > 0
+    end
+
+    func progressText() -> String do
+        var done = 0
+        for o in this.objectives do if o.done() do done += 1 end end
+        return "{done}/{len(this.objectives)}"
+    end
+
+    /// Продвинуть цели по игровому событию.
+    /// Возвращает true, если квест завершён ЭТИМ событием.
+    func notify(kind: String, target: String, amount: Int = 1) -> Bool do
+        var changed = false
+        for o in this.objectives do
+            if o.kind == kind and (o.target == target or o.target == "*") do
+                let wasDone = o.done()
+                o.advance(amount)
+                if o.done() and not wasDone do changed = true end
+            end
+        end
+        if changed and this.onStage != nil do this.onStage(this, this.stage) end
+        return this.completed()
+    end
+end
+
+/// Журнал квестов.
+class QuestLog do
+    var quests
+    var active
+    var completedIds
+    var failedIds
+    var onQuestStarted = nil
+    var onQuestCompleted = nil
+
+    func init() do
+        this.quests = {}
+        this.active = []
+        this.completedIds = []
+        this.failedIds = []
+    end
+
+    func register(q: Quest) do
+        this.quests[q.id] = q
+        return this
+    end
+
+    func start(id: String) -> Bool do
+        if not this.quests.has(id) do
+            print("[Quest] unknown quest '" + id + "'")
+            return false
+        end
+        if this.active.contains(id) or this.completedIds.contains(id) do return false end
+        this.active.push(id)
+        if this.onQuestStarted != nil do this.onQuestStarted(this.quests[id]) end
+        return true
+    end
+
+    func isActive(id: String) -> Bool do return this.active.contains(id) end
+    func isCompleted(id: String) -> Bool do return this.completedIds.contains(id) end
+    func get(id: String) do return this.quests.get(id, nil) end
+
+    /// Разослать игровое событие всем активным квестам.
+    /// Возвращает список квестов, завершившихся на этом событии.
+    func notify(kind: String, target: String, amount: Int = 1) do
+        var justCompleted = []
+        for id in this.active do
+            let q = this.quests[id]
+            if q.notify(kind, target, amount) do justCompleted.push(q) end
+        end
+        for q in justCompleted do this.complete(q.id) end
+        return justCompleted
+    end
+
+    func complete(id: String) do
+        let idx = this.active.indexOf(id)
+        if idx >= 0 do this.active.removeAt(idx) end
+        if not this.completedIds.contains(id) do this.completedIds.push(id) end
+        let q = this.quests.get(id, nil)
+        if q != nil do
+            if q.onCompleted != nil do q.onCompleted(q) end
+            if this.onQuestCompleted != nil do this.onQuestCompleted(q) end
+            if q.nextQuest != nil do this.start(q.nextQuest) end
+        end
+    end
+
+    func fail(id: String) do
+        let idx = this.active.indexOf(id)
+        if idx >= 0 do this.active.removeAt(idx) end
+        if not this.failedIds.contains(id) do this.failedIds.push(id) end
+    end
+
+    /// Сводка для UI журнала.
+    func journal() do
+        var out = []
+        for id in this.active do
+            let q = this.quests[id]
+            out.push({"id": q.id, "title": q.title, "progress": q.progressText()})
+        end
+        return out
+    end
+end

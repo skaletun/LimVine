@@ -1,0 +1,24 @@
+# Артефакты сборки
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.d
+build/
+cmake-build-*/
+out/
+dist/
+
+# Кэш скомпилированного байткода LV Script (.lvs -> .lvc)
+*.lvc
+
+# Редактор / IDE
+.vscode/
+.idea/
+*.swp
+compile_commands.json
+
+# ОС
+.DS_Store
+Thumbs.db

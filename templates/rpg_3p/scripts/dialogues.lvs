@@ -1,0 +1,99 @@
+# ============================================================================
+#  Third-Person RPG — содержание диалогов
+#
+#  Диалоговый ДВИЖОК берётся из stdlib/dialogue.lvs; здесь только данные и
+#  действия узлов. Узел — обычный map, поэтому диалоги можно править в
+#  редакторе (или генерировать из таблиц локализации) без правки кода.
+#
+#  Обратите внимание на `require`: условие доступности ветки — лямбда, которая
+#  получает экземпляр диалога и читает его флаги. Так ветка повторной выдачи
+#  награды скрывается, если меч уже получен.
+# ============================================================================
+
+class DialogueBank do
+    var elder
+    var smith
+    var questLog              # QuestLog из stdlib/quest.lvs
+
+    func init(log) do
+        this.questLog = log
+        this.elder = nil
+        this.smith = nil
+    end
+
+    /// Диалог старейшины: выдаёт квест «волки» и закрывает его.
+    func buildElder() do
+        let d = new Dialogue("greet")
+        let log = this.questLog
+        d.node("greet", {
+            "speaker": "Elder",
+            "text": "Wolves from the ridge keep circling the village. We cannot sleep.",
+            "choices": [
+                {"text": "I will clear the ridge.", "goto": "accept"},
+                {"text": "What is in it for me?", "goto": "reward_talk"},
+                {"text": "Farewell.", "goto": "bye"}
+            ]
+        })
+        d.node("reward_talk", {
+            "speaker": "Elder",
+            "text": "The smith owes me a favour. Slay two wolves and he will forge you a blade.",
+            "next": "accept"
+        })
+        d.node("accept", {
+            "speaker": "Elder",
+            "text": "Then take this. Two wolves — and come back to me.",
+            "actions": [|| { log.start("wolves") }],
+            "next": "bye"
+        })
+        d.node("bye", {"speaker": "Elder", "text": "Walk carefully."})
+
+        # Отдельный диалог завершения: его показывают, когда квест закрыт.
+        let done = new Dialogue("report")
+        done.node("report", {
+            "speaker": "Elder",
+            "text": "The ridge is quiet again. The village owes you.",
+            "actions": [|| { done.setFlag("reported", true) }],
+            "next": "thanks"
+        })
+        done.node("thanks", {"speaker": "Elder", "text": "Ask the smith for your reward."})
+
+        this.elder = {"main": d, "done": done}
+        return this.elder
+    end
+
+    /// Диалог кузнеца: выдаёт награду один раз (флаг `got_sword`).
+    func buildSmith() do
+        let d = new Dialogue("greet")
+        d.node("greet", {
+            "speaker": "Smith",
+            "text": "You look like someone who breaks things for a living.",
+            "choices": [
+                {"text": "The elder sent me.", "goto": "reward",
+                 "require": |dlg| { dlg.flag("wolves_done") == true }},
+                {"text": "Just passing through.", "goto": "smalltalk"}
+            ]
+        })
+        d.node("smalltalk", {"speaker": "Smith", "text": "Mind the wolves east of the well."})
+        d.node("reward", {
+            "speaker": "Smith",
+            "text": "Two wolves down? Then this blade is yours.",
+            "actions": [|| {
+                d.setFlag("got_sword", true)
+                giveSword()
+            }],
+            "next": "farewell"
+        })
+        d.node("farewell", {"speaker": "Smith", "text": "Keep the edge up."})
+        this.smith = d
+        return d
+    end
+end
+
+/// Выдача награды: предмет в инвентарь игрока.
+///
+/// Свободная функция (а не метод DialogueBank), потому что её вызывают лямбды
+/// действий узлов — они не имеют доступа к this банка диалогов.
+func giveSword() do
+    PlayerInv.add("iron_sword", 1)
+    return PlayerInv.countOf("iron_sword")
+end

@@ -1,0 +1,53 @@
+# ============================================================================
+#  FPS Shooter — конфигурация
+# ============================================================================
+
+import math
+
+# ---- Арена -----------------------------------------------------------------
+global CFG_ARENA = 40.0           # сторона квадратной арены
+global CFG_WALL_H = 3.0
+global CFG_COVER_COUNT = 6        # число ящиков-укрытий
+
+# ---- Игрок -----------------------------------------------------------------
+global CFG_EYE_HEIGHT = 1.7
+global CFG_WALK_SPEED = 5.0
+global CFG_SPRINT_SPEED = 8.2
+global CFG_JUMP_IMPULSE = 6.5
+global CFG_MOUSE_SENS = 0.09
+global CFG_PLAYER_HP = 100
+
+# ---- Оружие: «винтовка» ----------------------------------------------------
+# Разброс растёт с каждым выстрелом и спадает со временем — это и есть «отдача»
+# в hitscan-модели: пуля летит не точно в прицел, а в пределах конуса.
+global WPN_RIFLE = {
+    "name": "Rifle",
+    "damage": 22,
+    "rpm": 640,               # выстрелов в минуту -> задержка между выстрелами
+    "magazine": 30,
+    "reserve": 120,
+    "reloadSeconds": 1.9,
+    "range": 90.0,
+    "spreadBase": 0.006,      # радианы
+    "spreadPerShot": 0.010,
+    "spreadMax": 0.075,
+    "spreadRecover": 0.16,    # спад разброса в секунду
+    "recoilPitch": 1.1,       # градусы на выстрел (подброс камеры)
+    "headshotMult": 2.0,
+}
+
+# ---- Враги -----------------------------------------------------------------
+global CFG_ENEMY_COUNT = 4
+global CFG_ENEMY_HP = 60
+global CFG_ENEMY_SPEED = 2.6
+global CFG_ENEMY_CHASE_SPEED = 4.1
+global CFG_ENEMY_SIGHT = 22.0
+global CFG_ENEMY_FIRE_RANGE = 16.0
+global CFG_ENEMY_DAMAGE = 6
+global CFG_ENEMY_FIRE_INTERVAL = 0.85
+global CFG_ENEMY_ACCURACY = 0.55   # вероятность попадания (честный шанс для игрока)
+
+# ---- Подбираемые предметы --------------------------------------------------
+global CFG_PICKUP_HEALTH = 25
+global CFG_PICKUP_AMMO = 30
+global CFG_PICKUP_RESPAWN = 12.0   # секунд

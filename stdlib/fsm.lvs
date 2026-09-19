@@ -1,0 +1,82 @@
+# ============================================================================
+#  LimVine Standard Library — fsm.lvs
+#  Конечный автомат состояний (State Machine) для AI и геймплея.
+#
+#  Дизайн: состояния — обычные объекты с методами enter/exit/update, переходы
+#  объявляются таблицей. Это намеренно НЕ «магия»: автомат можно прочитать
+#  глазами и отладить в консоли (`fsm.current`).
+#
+#  Использование:
+#      import "fsm"
+#      let ai = new StateMachine()
+#      ai.state("Idle",   { enter: || print("idle"),   update: |dt| aiCheck() })
+#      ai.state("Chase",  { enter: || print("chase"),  update: |dt| chasePlayer(dt) })
+#      ai.transition("Idle", "Chase", || canSeePlayer())
+#      ai.start("Idle")
+#      ...
+#      ai.update(dt)   # вызывать каждый кадр
+# ============================================================================
+
+class StateMachine do
+    var states                 # name -> {enter, exit, update}
+    var rules                  # [{from, to, when}]
+    var current = nil               # имя текущего состояния
+    var timeInState = 0.0
+    var debugLog = false
+
+    func init() do
+        this.states = {}
+        this.rules = []
+    end
+
+    /// Объявить состояние. @p handlers — map с необязательными enter/exit/update.
+    func state(name: String, handlers) do
+        this.states[name] = handlers
+        return this
+    end
+
+    /// Добавить правило перехода: если `when()` вернёт true — переход.
+    func transition(from: String, to: String, when) do
+        this.rules.push({"from": from, "to": to, "when": when})
+        return this
+    end
+
+    /// Переход по имени (без проверки условий).
+    func changeState(name: String) do
+        if not this.states.has(name) do
+            print("[FSM] unknown state '" + name + "'")
+            return false
+        end
+        if this.current == name do return false end
+
+        if this.current != nil do
+            let prev = this.states[this.current]
+            if prev.has("exit") do prev["exit"]() end
+        end
+        this.current = name
+        this.timeInState = 0.0
+        let next = this.states[name]
+        if next.has("enter") do next["enter"]() end
+        if this.debugLog do print("[FSM] -> " + name) end
+        return true
+    end
+
+    /// Тик автомата: сначала проверка переходов, затем update текущего состояния.
+    func update(dt: Float) do
+        this.timeInState += dt
+        for rule in this.rules do
+            if rule["from"] == this.current and rule["when"]() do
+                this.changeState(rule["to"])
+                break
+            end
+        end
+        if this.current == nil do return nil end
+        let st = this.states[this.current]
+        if st.has("update") do return st["update"](dt) end
+        return nil
+    end
+
+    /// Сколько секунд находимся в текущем состоянии.
+    func elapsed() -> Float do return this.timeInState end
+    func isIn(name: String) -> Bool do return this.current == name end
+end

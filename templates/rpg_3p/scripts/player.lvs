@@ -1,0 +1,174 @@
+# ============================================================================
+#  Third-Person RPG — контроллер игрока
+#
+#  Управление: WASD относительно направления камеры (как в любой RPG от 3-го
+#  лица), мышь крутит камеру, E — взаимодействие, ЛКМ/Space — атака.
+#  Камера в headless-режиме не рисуется, но её yaw/pitch считаются честно,
+#  поэтому направление удара (raycast) совпадает с тем, что видит игрок.
+# ============================================================================
+
+class PlayerController do
+    var ent
+    var hp = 0
+    var maxHp = 0
+    var stamina = 0.0
+    var yaw = 0.0
+    var pitch = 0.0
+    var dead = false
+    var prompt = ""             # подсказка «что можно сделать» для HUD
+    var nearActor = nil
+
+    func init(spawnPos) do
+        this.hp = CFG_PLAYER_HP
+        this.maxHp = CFG_PLAYER_HP
+        this.stamina = CFG_STAMINA_MAX
+        this.yaw = 0.0
+        this.pitch = 0.0
+        this.dead = false
+        this.prompt = ""
+        this.nearActor = nil
+        this.ent = spawn()
+        setPosition(this.ent, vec3(spawnPos["x"], spawnPos["y"], spawnPos["z"]))
+        setField(this.ent, "Transform", "scale", vec3(0.7, 1.8, 0.7))
+        setField(this.ent, "MeshRenderer", "tint", color(0.85, 0.88, 0.95, 1.0))
+        # Кинематик (Static=0, Kinematic=1, Dynamic=2): позицией владеет скрипт,
+        # физика лишь предоставляет коллайдер для raycast'ов и препятствий.
+        addRigidBody(this.ent, vec3(0.35, 0.9, 0.35), 1)
+        return this
+    end
+
+    /// Кадр: камера, движение, подсказка взаимодействия.
+    func update(dt, actors, world) do
+        this.updateCamera(dt)
+        this.updateMovement(dt)
+        if this.stamina < CFG_STAMINA_MAX do
+            this.stamina = math.min(CFG_STAMINA_MAX, this.stamina + CFG_STAMINA_REGEN * dt)
+        end
+        this.updatePrompt(actors, world)
+        return this.hp
+    end
+
+    /// Мышь -> yaw/pitch. В headless mouseDelta() возвращает (0,0), поэтому
+    /// тесты задают yaw напрямую через lookAt().
+    func updateCamera(dt) do
+        let d = mouseDelta()
+        this.yaw = this.yaw + d.x * CFG_MOUSE_SENS
+        this.pitch = math.clamp(this.pitch - d.y * CFG_MOUSE_SENS, -60.0, 60.0)
+        if this.yaw > 180.0 do this.yaw -= 360.0 end
+        if this.yaw < -180.0 do this.yaw += 360.0 end
+        return this.yaw
+    end
+
+    /// Движение относительно камеры: «вперёд» — туда, куда смотрит игрок.
+    func updateMovement(dt) do
+        if this.dead do return nil end
+        let ax = inputAxis("MoveX")
+        let ay = inputAxis("MoveY")
+        if ax == 0.0 and ay == 0.0 do return nil end
+        let running = inputHeld("Run")
+        let speed = if running and this.stamina > 1.0 do CFG_PLAYER_RUN else CFG_PLAYER_SPEED end
+        if running do this.stamina = math.max(0.0, this.stamina - 9.0 * dt) end
+        let r = math.rad(this.yaw)
+        # Поворот вектора ввода на yaw камеры.
+        let fx = math.sin(r)
+        let fz = math.cos(r)
+        var dx = fx * ay + fz * ax
+        var dz = fz * ay - fx * ax
+        let l = math.sqrt(dx * dx + dz * dz)
+        if l > 0.0001 do
+            dx = dx / l
+            dz = dz / l
+        end
+        let p = getPosition(this.ent)
+        let np = clampToWorld(vec3(p.x + dx * speed * dt, p.y, p.z + dz * speed * dt))
+        setPosition(this.ent, np)
+        setRotationEuler(this.ent, vec3(0, this.yaw, 0))
+        return np
+    end
+
+    /// Точка «глаз» — начало raycast'а атаки и проверки видимости.
+    func eyePosition() do
+        let p = getPosition(this.ent)
+        return vec3(p.x, p.y + CFG_CAMERA_HEIGHT, p.z)
+    end
+
+    /// Начало луча атаки: на высоте груди, а не «глаз».
+    ///
+    /// Глаза игрока находятся на y≈2.1, тогда как коллайдеры NPC и волков
+    /// центрированы примерно на y≈1.3, поэтому луч из глаз пролетал НАД целью.
+    func attackOrigin() do
+        let p = getPosition(this.ent)
+        return vec3(p.x, p.y + CFG_ATTACK_HEIGHT, p.z)
+    end
+
+    /// Направление взгляда (единичный вектор) с учётом yaw и pitch.
+    func lookDirection() do
+        let r = math.rad(this.yaw)
+        let pr = math.rad(this.pitch)
+        let cp = math.cos(pr)
+        return vec3(math.sin(r) * cp, math.sin(pr), math.cos(r) * cp)
+    end
+
+    /// Повернуть игрока к точке (используется тестами и «автоприцеливанием»).
+    func lookAt(pos) do
+        let p = getPosition(this.ent)
+        this.yaw = math.deg(math.atan2(pos.x - p.x, pos.z - p.z))
+        this.pitch = 0.0
+        return this.yaw
+    end
+
+    /// Подсказка взаимодействия: что произойдёт по E.
+    func updatePrompt(actors, world) do
+        let p = getPosition(this.ent)
+        this.nearActor = nil
+        this.prompt = ""
+        var bestD = CFG_INTERACT_RANGE
+        for k, a in actors.actors do
+            if a["dead"] do continue end
+            let d = vec3Distance(p, getPosition(a["entity"]))
+            if d < bestD do
+                bestD = d
+                this.nearActor = a
+            end
+        end
+        if this.nearActor != nil do
+            this.prompt = "Talk to " + this.nearActor["id"]
+            return this.prompt
+        end
+        let it = world.nearestInteractable(p, CFG_INTERACT_RANGE)
+        if it != nil do
+            this.prompt = it["label"]
+            this.nearActor = nil
+        end
+        return this.prompt
+    end
+
+    func regen(dt) do
+        if this.dead do return 0 end
+        if this.hp < this.maxHp do this.hp = math.min(this.maxHp, this.hp + dt * 1.2) end
+        return this.hp
+    end
+
+    func takeDamage(amount: Int) -> Int do
+        if this.dead do return 0 end
+        this.hp = math.max(0, this.hp - amount)
+        return this.hp
+    end
+
+    func die() do
+        this.dead = true
+        this.prompt = "You died"
+        setField(this.ent, "Transform", "scale", vec3(0.9, 0.3, 0.9))
+        return false
+    end
+
+    /// Возродиться у костра (демонстрация «чекпоинта»).
+    func respawn() do
+        this.dead = false
+        this.hp = this.maxHp
+        this.stamina = CFG_STAMINA_MAX
+        setField(this.ent, "Transform", "scale", vec3(0.7, 1.8, 0.7))
+        setPosition(this.ent, vec3(CAMPFIRE["x"], CAMPFIRE["y"] + 0.4, CAMPFIRE["z"]))
+        return this.hp
+    end
+end

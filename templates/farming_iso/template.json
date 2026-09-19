@@ -1,0 +1,13 @@
+{
+  "id": "farming_iso",
+  "name": "Isometric Farming",
+  "summary": "Изометрическая ферма: вспашка грядок, посадка, рост во времени, полив, сбор урожая, отгрузка и смена дней.",
+  "engine": { "backend": "OpenGL", "physics": "fallback", "audio": "OpenAL" },
+  "stdlib": ["inventory", "tween", "fsm"],
+  "scripts": ["scripts/config.lvs", "scripts/world.lvs", "scripts/crops.lvs", "scripts/player.lvs", "scripts/economy.lvs", "scripts/main.lvs"],
+  "input": {
+    "contexts": ["Farm"],
+    "actions": ["MoveX", "MoveY", "Interact", "Inventory", "Sleep"]
+  },
+  "tags": ["isometric", "farming", "casual", "grid"]
+}

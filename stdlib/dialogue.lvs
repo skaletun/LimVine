@@ -1,0 +1,131 @@
+# ============================================================================
+#  LimVine Standard Library — dialogue.lvs
+#  Диалоговая система на основе графа.
+#
+#  Узел диалога — это запись:
+#      {
+#        id:      "intro",
+#        speaker: "Elder",
+#        text:    "The wells are running dry.",
+#        choices: [{text: "I'll help", goto: "accept"},
+#                  {text: "Not my problem", goto: "refuse", require: fn(inv) ...}],
+#        actions: [fn() ...],     # выполняются при входе в узел
+#        next:    "outro"         # если choices пуст — линейный переход
+#      }
+#
+#  Система отделена от представления: она лишь выдаёт «текущий узел» и принимает
+#  выбор, а рисует всё UI-слой. Это же позволяет прогонять диалоги в тестах.
+# ============================================================================
+
+class Dialogue do
+    var nodes
+    var startId = ""
+    var currentId = nil
+    var flags              # игровые флаги, которые диалог может ставить/читать
+    var onNode = nil            # колбэк (node) — для озвучки/субтитров
+    var onEnd = nil             # колбэк (dialogueId)
+    var history
+
+    func init(startNode: String = "") do
+        this.nodes = {}
+        this.startId = startNode
+        this.flags = {}
+        this.history = []
+    end
+
+    /// Добавить узел. Возвращает self для цепочки вызовов.
+    func node(id: String, data) do
+        this.nodes[id] = data
+        if this.startId == "" do this.startId = id end
+        return this
+    end
+
+    func setFlag(name: String, value = true) do
+        this.flags[name] = value
+        return this
+    end
+    func flag(name: String, fallback = nil) do return this.flags.get(name, fallback) end
+
+    /// Начать диалог. Возвращает первый узел.
+    func start() do
+        this.currentId = this.startId
+        this.history = []
+        return this.enterNode(this.currentId)
+    end
+
+    /// Текущий узел (или nil).
+    func current() do
+        if this.currentId == nil do return nil end
+        return this.nodes.get(this.currentId, nil)
+    end
+
+    /// Доступные выборы текущего узла с учётом условий `require`.
+    func availableChoices() do
+        let node = this.current()
+        if node == nil do return [] end
+        let choices = node.get("choices", [])
+        var out = []
+        for c in choices do
+            if not c.has("require") or c["require"](this) do out.push(c) end
+        end
+        return out
+    end
+
+    /// Сделать выбор по индексу (индекс — в списке ДОСТУПНЫХ выборов).
+    func choose(index: Int) do
+        let choices = this.availableChoices()
+        if index < 0 or index >= len(choices) do return nil end
+        let c = choices[index]
+        if c.has("actions") do for a in c["actions"] do a(this) end end
+        if c.has("setFlags") do
+            for k, v in c["setFlags"] do this.flags[k] = v end
+        end
+        return this.goTo(c.get("goto", nil))
+    end
+
+    /// Перейти к узлу по id.
+    func goTo(id) do
+        if id == nil do return this.finish() end
+        if not this.nodes.has(id) do
+            print("[Dialogue] missing node '" + str(id) + "'")
+            return this.finish()
+        end
+        this.currentId = id
+        return this.enterNode(id)
+    end
+
+    /// Линейный переход («далее»).
+    func advance() do
+        let node = this.current()
+        if node == nil do return nil end
+        return this.goTo(node.get("next", nil))
+    end
+
+    func finish() do
+        let finished = this.currentId
+        this.currentId = nil
+        if this.onEnd != nil do this.onEnd(finished) end
+        return nil
+    end
+
+    func enterNode(id: String) do
+        let node = this.nodes.get(id, nil)
+        if node == nil do return nil end
+        this.history.push(id)
+        if node.has("actions") do for a in node["actions"] do a(this) end end
+        if node.has("setFlags") do
+            for k, v in node["setFlags"] do this.flags[k] = v end
+        end
+        if this.onNode != nil do this.onNode(node) end
+        # Узел без выборов и без next завершает диалог при advance().
+        return node
+    end
+
+    /// Пройден ли диалог полностью (для квестов и NPC-реакций).
+    func visited(id: String) -> Bool do return this.history.contains(id) end
+end
+
+/// Удобный конструктор «говорящей головы» с одной репликой.
+func lineNode(speaker: String, text: String, nextId = nil) do
+    return {"speaker": speaker, "text": text, "next": nextId}
+end

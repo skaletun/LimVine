@@ -1,0 +1,59 @@
+# ============================================================================
+#  Isometric Farming — конфигурация
+#
+#  Все «магические числа» шаблона собраны здесь, чтобы дизайнер мог менять
+#  баланс без правки логики. Файл грузится ПЕРВЫМ (см. template.json), поэтому
+#  объявленные здесь имена являются глобалами модуля и видны остальным файлам.
+# ============================================================================
+
+import math          # math.floor для worldToCell
+
+# ---- Сетка грядок ----------------------------------------------------------
+global CFG_GRID_W = 8            # грядок по X
+global CFG_GRID_H = 6            # грядок по Z
+global CFG_CELL = 2.0            # размер клетки в метрах
+global CFG_ORIGIN_X = -7.0       # левый нижний угол поля (изометрия: центр в 0)
+global CFG_ORIGIN_Z = -5.0
+
+# ---- Время -----------------------------------------------------------------
+global CFG_DAY_SECONDS = 90.0    # длительность игрового дня в реальных секундах
+global CFG_TICK = 1.0 / 60.0     # шаг логики роста
+
+# ---- Культуры: стадий роста всегда 4 (семя -> росток -> зрелое -> увядшее) --
+# growSeconds — сколько игровых секунд занимает ПОЛНЫЙ цикл до зрелости.
+global CROPS = {
+    "turnip":  {"name": "Turnip",  "growSeconds": 24.0, "seedPrice": 4,  "sellPrice": 9,  "regrow": false},
+    "potato":  {"name": "Potato",  "growSeconds": 36.0, "seedPrice": 8,  "sellPrice": 16, "regrow": false},
+    "tomato":  {"name": "Tomato",  "growSeconds": 48.0, "seedPrice": 12, "sellPrice": 22, "regrow": true},
+}
+global CROP_ORDER = ["turnip", "potato", "tomato"]   # порядок переключения клавишей
+
+# ---- Игрок -----------------------------------------------------------------
+global CFG_WALK_SPEED = 5.0      # м/с
+global CFG_REACH = 2.6           # радиус взаимодействия с грядкой, м
+global CFG_START_GOLD = 50
+global CFG_START_SEEDS = {"turnip": 6, "potato": 3, "tomato": 0}
+global CFG_ENERGY_MAX = 100
+global CFG_ENERGY_TILL = 4       # стоимость вспашки
+global CFG_ENERGY_WATER = 2
+global CFG_ENERGY_HARVEST = 3
+
+# ---- Анимация «кивка» грядки (см. CropSystem.updateAnims) -------------------
+global CFG_BUMP_SECONDS = 0.28   # длительность
+global CFG_BUMP_AMOUNT = 0.14    # амплитуда прироста масштаба
+
+# ---- Отгрузка --------------------------------------------------------------
+global CFG_BIN_POS = {"x": 9.0, "y": 0.0, "z": 4.0}
+global CFG_SHIP_RATIO = 1.0      # множитель цены продажи (бонусы дня можно вешать сюда)
+
+/// Позиция центра клетки (gx, gz) в мировых координатах.
+func cellToWorld(gx, gz) do
+    return vec3(CFG_ORIGIN_X + gx * CFG_CELL, 0.0, CFG_ORIGIN_Z + gz * CFG_CELL)
+end
+
+/// Обратное преобразование: мировая позиция -> клетка (округление вниз).
+func worldToCell(p) do
+    let gx = int(math.floor((p.x - CFG_ORIGIN_X + CFG_CELL * 0.5) / CFG_CELL))
+    let gz = int(math.floor((p.z - CFG_ORIGIN_Z + CFG_CELL * 0.5) / CFG_CELL))
+    return {"x": gx, "z": gz}
+end

@@ -1,0 +1,170 @@
+# ============================================================================
+#  Isometric Farming — игрок
+#
+#  Изометрическое управление: оси ввода MoveX/MoveY отображаются на
+#  диагональные направления камеры (классика жанра), поэтому «вверх» на
+#  клавиатуре visually двигает фермера вглубь кадра.
+#
+#  Взаимодействие — по ближайшей грядке в радиусе CFG_REACH: одна кнопка
+#  последовательно вспахивает, сажает, поливает и собирает, что убирает
+#  необходимость держать в голове разные клавиши (и хорошо ложится на геймпад).
+# ============================================================================
+
+class FarmPlayer do
+    var ent                   # сущность ECS фермера
+    var energy = 0
+    var selectedSeed = 0      # индекс в CROP_ORDER
+    var lastAction = ""       # для логов/подсказок UI
+    var crops                 # CropSystem
+    var world                 # FarmWorld
+    var inventory             # Inventory из stdlib
+    var facing = 0.0          # yaw в градусах
+
+    func init(w, cropSystem, inv) do
+        this.world = w
+        this.crops = cropSystem
+        this.inventory = inv
+        this.energy = CFG_ENERGY_MAX
+        this.selectedSeed = 0
+        this.lastAction = "spawn"
+        this.facing = 0.0
+        this.ent = spawn()
+        setPosition(this.ent, vec3(0.0, 0.5, CFG_ORIGIN_Z + CFG_GRID_H * CFG_CELL + 1.5))
+        setField(this.ent, "Transform", "scale", vec3(0.7, 1.6, 0.7))
+        setField(this.ent, "MeshRenderer", "tint", color(0.95, 0.85, 0.35, 1.0))
+        # Тело для физики: фермер не проваливается и толкает ящики.
+        addRigidBody(this.ent, vec3(0.35, 0.8, 0.35), 1)   # кинематик: фермер водится скриптом
+    end
+
+    /// Имя выбранной культуры.
+    func selectedCrop() -> String do return CROP_ORDER[this.selectedSeed] end
+
+    /// Переключить культуру (колесо/клавиша).
+    func cycleSeed(dir: Int) do
+        let n = len(CROP_ORDER)
+        this.selectedSeed = (this.selectedSeed + dir + n) % n
+        this.lastAction = "seed:" + this.selectedCrop()
+        return this.selectedCrop()
+    end
+
+    /// Кадровое обновление: движение + взаимодействие.
+    func update(dt) do
+        this.move(dt)
+        if inputPressed("Interact") do this.interact() end
+        if inputPressed("NextSeed") do this.cycleSeed(1) end
+        if inputPressed("PrevSeed") do this.cycleSeed(-1) end
+        # Энергия восстанавливается медленно, но не выше максимума.
+        this.energy = math.min(CFG_ENERGY_MAX, this.energy + dt * 0.8)
+        return this.energy
+    end
+
+    /// Движение по изометрическим осям с ограничением по границам фермы.
+    func move(dt) do
+        let ax = inputAxis("MoveX")
+        let ay = inputAxis("MoveY")
+        if ax == 0.0 and ay == 0.0 do return nil end
+        # Изометрия: поворачиваем вектор ввода на 45°, чтобы «вперёд» уходило
+        # вглубь кадра. Нормируем, иначе диагональ была бы быстрее.
+        var dx = (ax - ay) * 0.70710678
+        var dz = (ax + ay) * 0.70710678
+        let l = math.sqrt(dx * dx + dz * dz)
+        if l > 0.0001 do
+            dx = dx / l
+            dz = dz / l
+        end
+        let p = getPosition(this.ent)
+        var nx = p.x + dx * CFG_WALK_SPEED * dt
+        var nz = p.z + dz * CFG_WALK_SPEED * dt
+        # Границы участка + запас на ящик отгрузки.
+        nx = math.clamp(nx, CFG_ORIGIN_X - 2.0, CFG_ORIGIN_X + CFG_GRID_W * CFG_CELL + 3.0)
+        nz = math.clamp(nz, CFG_ORIGIN_Z - 2.0, CFG_ORIGIN_Z + CFG_GRID_H * CFG_CELL + 3.0)
+        setPosition(this.ent, vec3(nx, p.y, nz))
+        this.facing = math.deg(math.atan2(dx, dz))
+        setRotationEuler(this.ent, vec3(0, this.facing, 0))
+        return nil
+    end
+
+    /// Найти грядку под игроком.
+    func targetPlot() do
+        return this.world.nearestPlot(getPosition(this.ent), CFG_REACH)
+    end
+
+    /// Единая кнопка взаимодействия: состояние грядки определяет действие.
+    func interact() do
+        let plot = this.targetPlot()
+        if plot == nil do
+            this.lastAction = "nothing"
+            return "nothing"
+        end
+        # 1) Целина -> вспахать.
+        if not plot["tilled"] do
+            if this.spendEnergy(CFG_ENERGY_TILL) do
+                plot["tilled"] = true
+                this.world.refreshPlotTint(plot)
+                playSound2D(1, 0.7)
+                this.lastAction = "till"
+                return "till"
+            end
+            this.lastAction = "tired"
+            return "tired"
+        end
+        # 2) Вспахано и пусто -> посадить выбранную культуру (если есть семена).
+        if plot["crop"] == nil do
+            let id = this.selectedCrop()
+            if this.inventory.countOf("seed_" + id) <= 0 do
+                this.lastAction = "no_seeds"
+                return "no_seeds"
+            end
+            if not this.spendEnergy(CFG_ENERGY_WATER) do
+                this.lastAction = "tired"
+                return "tired"
+            end
+            this.inventory.remove("seed_" + id, 1)
+            this.crops.plant(plot, id)
+            this.lastAction = "plant:" + id
+            return "plant"
+        end
+        # 3) Зрелое -> собрать.
+        if this.world.stageOf(plot) >= 2 do
+            if not this.spendEnergy(CFG_ENERGY_HARVEST) do
+                this.lastAction = "tired"
+                return "tired"
+            end
+            # ID культуры читаем ДО harvest(): для одноразовых культур сбор
+            # очищает plot["crop"], и тогда в инвентарь попал бы nil.
+            let cropId = plot["crop"]
+            let got = this.crops.harvest(plot)
+            if got > 0 do
+                this.inventory.add(cropId, 1)
+                this.lastAction = "harvest:" + cropId
+                playSound2D(2, 0.8)
+                return "harvest"
+            end
+            this.lastAction = "wilted"
+            return "wilted"
+        end
+        # 4) Растёт -> полить.
+        if not plot["watered"] and this.spendEnergy(CFG_ENERGY_WATER) do
+            this.crops.water(plot)
+            this.lastAction = "water"
+            playSound2D(3, 0.5)
+            return "water"
+        end
+        this.lastAction = "waiting"
+        return "waiting"
+    end
+
+    /// Потратить энергию; false, если фермер слишком устал.
+    func spendEnergy(cost: Int) -> Bool do
+        if this.energy < cost do return false end
+        this.energy -= cost
+        return true
+    end
+
+    /// Сброс в начале дня (сон): энергия полностью восстанавливается.
+    func sleep() do
+        this.energy = CFG_ENERGY_MAX
+        this.lastAction = "sleep"
+        return this.energy
+    end
+end

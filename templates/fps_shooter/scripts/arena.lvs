@@ -1,0 +1,74 @@
+# ============================================================================
+#  FPS Shooter — арена
+#
+#  Арена: пол, четыре стены и несколько ящиков-укрытий. Все препятствия —
+#  статические тела физики, поэтому hitscan-лучи честно в них упираются
+#  (raycast движка возвращает попадание в стену, а не в врага за ней).
+# ============================================================================
+
+class Arena do
+    var entities
+    var covers
+    var spawnPoints
+
+    func init() do
+        this.entities = []
+        this.covers = []
+        this.spawnPoints = []
+    end
+
+    func build() do
+        let half = CFG_ARENA * 0.5
+        this.addBox(vec3(0, -0.25, 0), vec3(CFG_ARENA, 0.5, CFG_ARENA), color(0.30, 0.32, 0.34, 1.0), true)
+
+        # Стены по периметру: игрок не выходит за арену, лучи не улетают в никуда.
+        this.addBox(vec3(0, CFG_WALL_H * 0.5, -half), vec3(CFG_ARENA, CFG_WALL_H, 0.6), color(0.42, 0.44, 0.48, 1.0), true)
+        this.addBox(vec3(0, CFG_WALL_H * 0.5, half), vec3(CFG_ARENA, CFG_WALL_H, 0.6), color(0.42, 0.44, 0.48, 1.0), true)
+        this.addBox(vec3(-half, CFG_WALL_H * 0.5, 0), vec3(0.6, CFG_WALL_H, CFG_ARENA), color(0.42, 0.44, 0.48, 1.0), true)
+        this.addBox(vec3(half, CFG_WALL_H * 0.5, 0), vec3(0.6, CFG_WALL_H, CFG_ARENA), color(0.42, 0.44, 0.48, 1.0), true)
+
+        # Укрытия расставлены детерминированно (без random): тесты полагаются
+        # на то, что конкретная точка арены всегда свободна или занята.
+        let spots = [
+            {"x": -8.0, "z": -6.0, "s": 2.4}, {"x": 6.0, "z": -9.0, "s": 2.0},
+            {"x": 11.0, "z": 4.0, "s": 2.8},  {"x": -12.0, "z": 7.0, "s": 2.2},
+            {"x": 2.0, "z": 11.0, "s": 2.0},  {"x": -3.0, "z": 2.0, "s": 1.6},
+        ]
+        var i = 0
+        while i < CFG_COVER_COUNT and i < len(spots) do
+            let sp = spots[i]
+            let e = this.addBox(vec3(sp["x"], sp["s"] * 0.5, sp["z"]),
+                                vec3(sp["s"], sp["s"], sp["s"]),
+                                color(0.55, 0.42, 0.28, 1.0), true)
+            this.covers.push({"entity": e, "x": sp["x"], "z": sp["z"], "size": sp["s"]})
+            i += 1
+        end
+
+        # Точки появления врагов — по углам, вдали от игрока.
+        this.spawnPoints.push(vec3(-15.0, 0.9, -15.0))
+        this.spawnPoints.push(vec3(15.0, 0.9, -15.0))
+        this.spawnPoints.push(vec3(-15.0, 0.9, 15.0))
+        this.spawnPoints.push(vec3(15.0, 0.9, 15.0))
+        return this
+    end
+
+    /// Ящик (или пол/стена): сущность + статическое физическое тело.
+    func addBox(pos, size, tint, solid: Bool) do
+        let e = spawn()
+        setPosition(e, pos)
+        setField(e, "Transform", "scale", size)
+        setField(e, "MeshRenderer", "tint", tint)
+        if solid do addRigidBody(e, vec3(size.x * 0.5, size.y * 0.5, size.z * 0.5), 0) end   # 0 = Static
+        this.entities.push(e)
+        return e
+    end
+
+    /// Свободна ли точка (не внутри укрытия). Используется спавном пикапов.
+    func isFree(x, z) -> Bool do
+        for c in this.covers do
+            let r = c["size"] * 0.5 + 0.6
+            if math.abs(x - c["x"]) < r and math.abs(z - c["z"]) < r do return false end
+        end
+        return true
+    end
+end

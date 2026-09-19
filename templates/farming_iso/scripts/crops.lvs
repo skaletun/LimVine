@@ -1,0 +1,157 @@
+import math          # math.sin/pi для анимации «кивка» грядки
+
+# ============================================================================
+#  Isometric Farming — рост культур
+#
+#  Рост считается НАКОПЛЕНИЕМ ВРЕМЕНИ в состоянии грядки, а не отдельной
+#  корутиной на каждую клетку: 48 грядок × корутина = 48 контекстов в
+#  планировщике, тогда как один проход по map'у в update() стоит дешевле и не
+#  требует держать состояние при горячей перезагрузке скрипта.
+#
+#  Корутины здесь всё же используются — там, где они уместны: плавный «кивок»
+#  грядки при посадке и сборе (анимация — корутина, см. bumpEntity).
+# ============================================================================
+
+class CropSystem do
+    var world                 # FarmWorld (внедряется из main.lvs)
+    var growthMultiplier = 1.0
+
+    func init(w) do
+        this.world = w
+        this.growthMultiplier = 1.0
+    end
+
+    /// Кадровый тик роста всех засаженных грядок.
+    ///
+    /// @param dt      дельта кадра
+    /// @param watered штраф/бонус: политая грядка растёт в 1.5 раза быстрее
+    func update(dt) do
+        if this.world == nil do return 0 end
+        var grown = 0
+        for k, plot in this.world.plots do
+            if plot["crop"] == nil do continue end
+            let def = CROPS[plot["crop"]]
+            # Полив удваивает скорость, но только пока грядка влажная:
+            # влажность снимается в конце дня (см. onNewDay).
+            var rate = this.growthMultiplier
+            if plot["watered"] do rate = rate * 1.5 end
+            plot["growth"] = plot["growth"] + dt * rate
+            # Переросшая культура вянет: это заставляет игрока возвращаться
+            # на поле и даёт смысл механике дня.
+            if plot["growth"] > def["growSeconds"] * 2.0 do
+                plot["wilted"] = true
+            end
+            if plot["growth"] >= def["growSeconds"] do grown += 1 end
+        end
+        return grown
+    end
+
+    /// Посадить культуру. Возвращает true при успехе.
+    func plant(plot, cropId) -> Bool do
+        if plot == nil do return false end
+        if not plot["tilled"] do return false end
+        if plot["crop"] != nil do return false end
+        if not CROPS.has(cropId) do return false end
+        plot["crop"] = cropId
+        plot["growth"] = 0.0
+        plot["wilted"] = false
+        this.world.cropsThisDay += 1
+        this.world.refreshPlotTint(plot)
+        this.bump(plot)
+        return true
+    end
+
+    /// Собрать урожай. Возвращает число собранных единиц (0 = нечего).
+    func harvest(plot) -> Int do
+        if plot == nil do return 0 end
+        if plot["crop"] == nil do return 0 end
+        if this.world.stageOf(plot) < 2 do return 0 end
+        let def = CROPS[plot["crop"]]
+        if plot["wilted"] do
+            # Вялый урожай не продаётся: грядка просто очищается.
+            plot["crop"] = nil
+            plot["growth"] = 0.0
+            plot["wilted"] = false
+            this.world.refreshPlotTint(plot)
+            return 0
+        end
+        if def["regrow"] do
+            # Многолетняя культура: куст остаётся, а прогресс откатывается
+            # назад, поэтому томат даёт урожай несколько раз за сезон.
+            plot["growth"] = def["growSeconds"] * 0.35
+        else
+            plot["crop"] = nil
+            plot["growth"] = 0.0
+        end
+        this.world.refreshPlotTint(plot)
+        this.bump(plot)
+        return 1
+    end
+
+    /// Полить грядку.
+    func water(plot) -> Bool do
+        if plot == nil do return false end
+        if plot["watered"] do return false end
+        plot["watered"] = true
+        this.world.refreshPlotTint(plot)
+        return true
+    end
+
+    /// Новый день: влажность испаряется, счётчики сбрасываются.
+    func onNewDay() do
+        if this.world == nil do return nil end
+        for k, plot in this.world.plots do
+            plot["watered"] = false
+            this.world.refreshPlotTint(plot)
+        end
+        this.world.cropsThisDay = 0
+        return nil
+    end
+
+    /// Поставить грядку на анимацию «кивка» (посадка/сбор урожая).
+    ///
+    /// Почему keyframes, а не корутина на клетку: метод-коротина компилируется в
+    /// ОДИН объект корутины на класс (см. Op::MakeCoroutine в Compiler), поэтому
+    /// одновременная анимация двух грядок перезапускала бы одну и ту же корутину.
+    /// Покадровая анимация в update() лишена этого ограничения, не требует
+    /// 48 контекстов в планировщике и детерминирована относительно dt.
+    func bump(plot) do
+        if plot == nil do return nil end
+        plot["anim"] = 0.0
+        return plot["entity"]
+    end
+
+    /// Продвинуть анимации грядок на dt и записать масштаб в Transform.
+    func updateAnims(dt) do
+        if this.world == nil do return 0 end
+        var active = 0
+        for k, plot in this.world.plots do
+            if not plot.has("anim") do continue end
+            if plot["anim"] == nil do continue end
+            plot["anim"] = plot["anim"] + dt
+            let t = plot["anim"] / CFG_BUMP_SECONDS
+            if t >= 1.0 do
+                plot["anim"] = nil
+                setField(plot["entity"], "Transform", "scale",
+                         vec3(CFG_CELL * 0.9, 0.15, CFG_CELL * 0.9))
+            else
+                # Один «прыжок» синусоидой: вверх и обратно без швов.
+                let k = 1.0 + CFG_BUMP_AMOUNT * math.sin(t * math.pi)
+                setField(plot["entity"], "Transform", "scale",
+                         vec3(CFG_CELL * 0.9 * k, 0.15 * k, CFG_CELL * 0.9 * k))
+                active += 1
+            end
+        end
+        return active
+    end
+
+    /// Сколько грядок готовы к сбору (для подсказок UI и туториала).
+    func readyCount() -> Int do
+        var n = 0
+        if this.world == nil do return 0 end
+        for k, plot in this.world.plots do
+            if plot["crop"] != nil and this.world.stageOf(plot) >= 2 and not plot["wilted"] do n += 1 end
+        end
+        return n
+    end
+end

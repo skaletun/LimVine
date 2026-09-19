@@ -1,0 +1,187 @@
+# ============================================================================
+#  LimVine Standard Library — inventory.lvs
+#  Инвентарь: слоты, стеки, вес, фильтры и события.
+#
+#  Хранение — обычный массив слотов, а не map: порядок в UI совпадает с порядком
+#  в данных, и сериализация в сохранение тривиальна.
+# ============================================================================
+
+/// Описание предмета (статические данные — обычно грузятся из ассетов).
+import math          # модуль движка: math.min/sqrt/abs/...
+
+class ItemDef do
+    var id = ""
+    var displayName = ""
+    var stackSize = 1
+    var weight = 0.0
+    var category = "misc"
+    var icon = ""
+    var consumable = false
+    var effects        # {"heal": 20, "stamina": 5}
+
+    func init(id: String, name: String, stack: Int = 1, w: Float = 0.0) do
+        this.id = id
+        this.displayName = name
+        this.stackSize = stack
+        this.weight = w
+        this.effects = {}      # свой контейнер на экземпляр (см. примечание в quest.lvs)
+    end
+end
+
+/// Каталог предметов.
+class ItemDatabase do
+    var defs
+
+    func init() do this.defs = {} end
+
+    func register(def: ItemDef) do
+        this.defs[def.id] = def
+        return this
+    end
+
+    func get(id: String) do return this.defs.get(id, nil) end
+    func has(id: String) -> Bool do return this.defs.has(id) end
+end
+
+/// Один слот инвентаря.
+class Slot do
+    var itemId = ""
+    var count = 0
+    func init(id: String = "", n: Int = 0) do
+        this.itemId = id
+        this.count = n
+    end
+    func empty() -> Bool do return this.count <= 0 end
+end
+
+/// Инвентарь с фиксированным числом слотов.
+class Inventory do
+    var slots
+    var capacity = 24
+    var maxWeight = 60.0
+    var db = nil
+    var onChange = nil          # колбэк (индекс, слот) для UI
+
+    func init(capacity: Int = 24, database = nil) do
+        this.capacity = capacity
+        this.db = database
+        this.slots = []
+        var i = 0
+        while i < capacity do
+            this.slots.push(new Slot())
+            i += 1
+        end
+    end
+
+    /// Текущий вес содержимого.
+    func weight() -> Float do
+        var total = 0.0
+        for s in this.slots do
+            if s.empty() do continue end
+            if this.db != nil do
+                let def = this.db.get(s.itemId)
+                if def != nil do total += def.weight * s.count end
+            end
+        end
+        return total
+    end
+
+    func countOf(itemId: String) -> Int do
+        var total = 0
+        for s in this.slots do
+            if s.itemId == itemId do total += s.count end
+        end
+        return total
+    end
+
+    func has(itemId: String, n: Int = 1) -> Bool do return this.countOf(itemId) >= n end
+
+    /// Добавить предмет. Возвращает число НЕразмещённых предметов (0 = всё влезло).
+    func add(itemId: String, count: Int = 1) -> Int do
+        var left = count
+        let def = if this.db != nil do this.db.get(itemId) else nil end
+        let stackMax = if def != nil do def.stackSize else 1 end
+
+        # 1) Докладываем в существующие неполные стеки.
+        for s in this.slots do
+            if left <= 0 do break end
+            if s.itemId == itemId and s.count < stackMax do
+                let room = stackMax - s.count
+                let put = math.min(room, left)
+                s.count += put
+                left -= put
+            end
+        end
+        # 2) Занимаем пустые слоты.
+        for i in 0..len(this.slots) do
+            if left <= 0 do break end
+            let s = this.slots[i]
+            if s.empty() do
+                let put = math.min(stackMax, left)
+                s.itemId = itemId
+                s.count = put
+                left -= put
+                if this.onChange != nil do this.onChange(i, s) end
+            end
+        end
+        return left
+    end
+
+    /// Забрать @p count предметов. Возвращает true, если хватило.
+    func remove(itemId: String, count: Int = 1) -> Bool do
+        if not this.has(itemId, count) do return false end
+        var left = count
+        for s in this.slots do
+            if left <= 0 do break end
+            if s.itemId == itemId do
+                let take = math.min(s.count, left)
+                s.count -= take
+                left -= take
+                if s.count <= 0 do s.itemId = "" end
+            end
+        end
+        return true
+    end
+
+    /// Использовать один предмет из слота (зелье, еда, свиток).
+    func use(slotIndex: Int) do
+        let s = this.slots[slotIndex]
+        if s.empty() do return nil end
+        s.count -= 1
+        if s.count <= 0 do s.itemId = "" end
+        if this.onChange != nil do this.onChange(slotIndex, s) end
+        return s.itemId
+    end
+
+    /// Все предметы заданной категории (для вкладок UI).
+    func itemsInCategory(category: String) do
+        var out = []
+        for s in this.slots do
+            if s.empty() do continue end
+            if this.db != nil do
+                let def = this.db.get(s.itemId)
+                if def != nil and def.category == category do out.push(s) end
+            end
+        end
+        return out
+    end
+
+    /// Сериализация в сохранение.
+    func serialize() do
+        var out = []
+        for s in this.slots do out.push({"id": s.itemId, "n": s.count}) end
+        return {"capacity": this.capacity, "slots": out}
+    end
+
+    func deserialize(data) do
+        if data == nil do return false end
+        let list = data["slots"]
+        var i = 0
+        while i < len(list) and i < len(this.slots) do
+            this.slots[i].itemId = list[i]["id"]
+            this.slots[i].count = list[i]["n"]
+            i += 1
+        end
+        return true
+    end
+end

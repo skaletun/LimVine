@@ -1,0 +1,69 @@
+# ============================================================================
+#  FPS Shooter — подбираемые предметы
+#
+#  Аптечки и коробки патронов стоят в фиксированных точках, подбираются при
+#  приближении и возрождаются через CFG_PICKUP_RESPAWN секунд. Возрождение
+#  сделано таймером в update(), а не корутиной на каждый пикап: объектов мало,
+#  а таймер переживает горячую перезагрузку скрипта как обычные данные.
+# ============================================================================
+
+class PickupSystem do
+    var pickups               # map id -> pickup
+    var playerEnt = nil
+
+    func init() do
+        this.pickups = {}
+        this.playerEnt = nil
+    end
+
+    func create(id: String, kind: String, pos) do
+        let e = spawn()
+        setPosition(e, pos)
+        setField(e, "Transform", "scale", vec3(0.55, 0.55, 0.55))
+        let tint = if kind == "health" do color(0.85, 0.25, 0.30, 1.0)
+                   else color(0.30, 0.65, 0.85, 1.0) end
+        setField(e, "MeshRenderer", "tint", tint)
+        this.pickups[id] = {
+            "id": id, "kind": kind, "entity": e, "pos": pos,
+            "taken": false, "respawnIn": 0.0,
+        }
+        return id
+    end
+
+    /// Кадровый тик: вращение, подбор, таймеры возрождения.
+    func update(dt, playerPos, onPickup) do
+        var taken = 0
+        for k, p in this.pickups do
+            if p["taken"] do
+                p["respawnIn"] -= dt
+                if p["respawnIn"] <= 0.0 do
+                    p["taken"] = false
+                    setField(p["entity"], "Transform", "scale", vec3(0.55, 0.55, 0.55))
+                end
+                continue
+            end
+            # Медленное вращение делает пикап заметным боковым зрением.
+            let cur = getPosition(p["entity"])
+            # Вращение вокруг Y: math.fmod в модуле math нет, поэтому остаток
+            # берётся оператором %, который для Float работает как fmod.
+            setRotationEuler(p["entity"], vec3(0, time() * 90.0 % 360.0, 0))
+            if vec3Distance(cur, playerPos) < 1.3 do
+                p["taken"] = true
+                p["respawnIn"] = CFG_PICKUP_RESPAWN
+                setField(p["entity"], "Transform", "scale", vec3(0.01, 0.01, 0.01))
+                if onPickup != nil do onPickup(p["kind"]) end
+                playSound2D(25, 0.7)
+                taken += 1
+            end
+        end
+        return taken
+    end
+
+    func availableCount() -> Int do
+        var n = 0
+        for k, p in this.pickups do
+            if not p["taken"] do n += 1 end
+        end
+        return n
+    end
+end

@@ -1,0 +1,10 @@
+{
+  "id": "rpg_3p",
+  "name": "Third-Person RPG",
+  "summary": "RPG от третьего лица: деревня с NPC на конечных автоматах, A*-навигация, ветвящиеся диалоги, журнал квестов и бой с отбрасыванием.",
+  "engine": { "backend": "Vulkan", "physics": "Jolt", "audio": "OpenAL" },
+  "stdlib": ["fsm", "pathfinding", "dialogue", "quest", "inventory", "tween"],
+  "scripts": ["scripts/config.lvs", "scripts/world.lvs", "scripts/npc.lvs", "scripts/dialogues.lvs", "scripts/quests.lvs", "scripts/player.lvs", "scripts/combat.lvs", "scripts/main.lvs"],
+  "input": { "contexts": ["Gameplay", "Dialogue"], "actions": ["MoveX", "MoveY", "Interact", "Attack", "Journal", "Cancel"] },
+  "tags": ["rpg", "third-person", "dialogue", "quests", "ai"]
+}

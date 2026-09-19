@@ -1,0 +1,249 @@
+# ============================================================================
+#  Third-Person RPG — точка входа
+#
+#  Здесь системы связываются друг с другом и объявляются глобальные
+#  обработчики, которые движок вызывает каждый кадр (update) и которые читают
+#  тесты/консоль редактора (templateState, test*).
+# ============================================================================
+
+# Инвентарь игрока — глобал, потому что его читают диалоги (награда кузнеца).
+global PlayerInv = new Inventory(16, nil)
+
+global World = new RpgWorld()
+World.build()
+
+global Actors = new ActorSystem(World)
+global Quests = new QuestSetup()
+global Dialogues = new DialogueBank(Quests.log)
+Dialogues.buildElder()
+Dialogues.buildSmith()
+global Combat = new CombatSystem(Actors, Quests)
+
+global Player = new PlayerController(SPAWN_PLAYER)
+Combat.player = Player
+
+PlayerInv.add("bread", 3)
+PlayerInv.add("health_potion", 1)
+
+# --- Население мира --------------------------------------------------------
+func populateWorld() do
+    # Дружелюбные NPC: патрулируют деревню и разговаривают.
+    Actors.create("elder", "village",
+                  vec3(SPAWN_ELDER["x"], SPAWN_ELDER["y"], SPAWN_ELDER["z"]),
+                  color(0.80, 0.72, 0.45, 1.0), CFG_NPC_HP)
+    Actors.create("smith", "village",
+                  vec3(SPAWN_SMITH["x"], SPAWN_SMITH["y"], SPAWN_SMITH["z"]),
+                  color(0.60, 0.45, 0.35, 1.0), CFG_NPC_HP)
+    World.registerInteractable("elder", Actors.get("elder")["entity"], "talk", "Talk to the elder")
+    World.registerInteractable("smith", Actors.get("smith")["entity"], "talk", "Talk to the smith")
+
+    # Враги за восточным колодцем: их видно из деревни, но не сразу.
+    Actors.create("wolf_a", "wild",
+                  vec3(SPAWN_WOLF_A["x"], SPAWN_WOLF_A["y"], SPAWN_WOLF_A["z"]),
+                  color(0.42, 0.40, 0.40, 1.0), CFG_NPC_HP)
+    Actors.create("wolf_b", "wild",
+                  vec3(SPAWN_WOLF_B["x"], SPAWN_WOLF_B["y"], SPAWN_WOLF_B["z"]),
+                  color(0.36, 0.34, 0.34, 1.0), CFG_NPC_HP)
+    return Actors.aliveEnemies()
+end
+let enemiesSpawned = populateWorld()
+
+# --- Ввод ------------------------------------------------------------------
+func setupInput() do
+    createInputContext("Gameplay", 0)
+    mapKeyAxis("Gameplay", "MoveX", 65, -1.0)      # A
+    mapKeyAxis("Gameplay", "MoveX", 68, 1.0)       # D
+    mapKeyAxis("Gameplay", "MoveY", 83, -1.0)      # S
+    mapKeyAxis("Gameplay", "MoveY", 87, 1.0)       # W
+    mapKey("Gameplay", "Run", 340)                 # Left Shift
+    mapKey("Gameplay", "Interact", 69)             # E
+    mapKey("Gameplay", "Attack", 32)               # Space
+    mapKey("Gameplay", "Journal", 74)              # J
+    mapMouseButton("Gameplay", "Attack", 0)        # ЛКМ
+    pushInputContext("Gameplay")
+
+    # Контекст диалога выше по приоритету: пока он активен, WASD не двигает
+    # игрока (демонстрация стека контекстов ввода).
+    createInputContext("Dialogue", 10)
+    mapKey("Dialogue", "DialogueAdvance", 69)      # E — следующая реплика
+    mapKey("Dialogue", "DialogueChoice0", 49)      # 1
+    mapKey("Dialogue", "DialogueChoice1", 50)      # 2
+    mapKey("Dialogue", "DialogueChoice2", 51)      # 3
+    mapKey("Dialogue", "Cancel", 256)              # Esc
+    return true
+end
+setupInput()
+
+# --- Диалоги ---------------------------------------------------------------
+global ActiveDialogue = nil
+
+func startDialogueWith(actorId: String) do
+    # `elif`/`else` — ветви ТОЙ ЖЕ конструкции if: у всей цепочки один `end`.
+    if actorId == "elder" do
+        # Если квест уже закрыт — показываем ветку завершения.
+        if Quests.log.isCompleted("wolves") do
+            ActiveDialogue = Dialogues.elder["done"]
+            Quests.log.notify("talk", "elder", 1)
+        else
+            ActiveDialogue = Dialogues.elder["main"]
+        end
+    elif actorId == "smith" do
+        ActiveDialogue = Dialogues.smith
+        Quests.log.notify("talk", "smith", 1)
+    else
+        ActiveDialogue = nil
+        return nil
+    end
+    ActiveDialogue.start()
+    pushInputContext("Dialogue")
+    print("[dialogue] " + ActiveDialogue.current()["speaker"] + ": " + ActiveDialogue.current()["text"])
+    return ActiveDialogue.current()
+end
+
+func advanceDialogue() do
+    if ActiveDialogue == nil do return nil end
+    let n = ActiveDialogue.advance()
+    if n == nil do
+        ActiveDialogue = nil
+        popInputContext("Dialogue")
+        print("[dialogue] (end)")
+        return nil
+    end
+    print("[dialogue] " + n["speaker"] + ": " + n["text"])
+    return n
+end
+
+func chooseDialogue(index: Int) do
+    if ActiveDialogue == nil do return nil end
+    let n = ActiveDialogue.choose(index)
+    if n == nil do
+        ActiveDialogue = nil
+        popInputContext("Dialogue")
+        return nil
+    end
+    print("[dialogue] -> " + n["speaker"] + ": " + n["text"])
+    return n
+end
+
+# --- Кадр ------------------------------------------------------------------
+func update(dt) do
+    Player.update(dt, Actors, World)
+    Actors.update(dt, Player.ent)
+    Combat.update(dt)
+
+    if ActiveDialogue != nil do
+        if inputPressed("DialogueAdvance") do advanceDialogue() end
+        if inputPressed("DialogueChoice0") do chooseDialogue(0) end
+        if inputPressed("DialogueChoice1") do chooseDialogue(1) end
+        if inputPressed("DialogueChoice2") do chooseDialogue(2) end
+        if inputPressed("Cancel") do
+            ActiveDialogue = nil
+            popInputContext("Dialogue")
+        end
+        return dt
+    end
+
+    if inputPressed("Interact") do
+        if Player.nearActor != nil do
+            startDialogueWith(Player.nearActor["id"])
+        end
+    end
+    if inputPressed("Attack") do
+        let r = Combat.attackPlayer()
+        if r["hit"] do
+            # Внутри {} интерполяции нельзя использовать другие скобки/кавычки,
+            # поэтому раскладываем результат в локалы.
+            let hid = r["id"]
+            let hhp = r["hp"]
+            print("[combat] hit {hid} hp={hhp}")
+        end
+    end
+    if inputPressed("Journal") do print("[journal]\n" + Quests.journalText()) end
+    return dt
+end
+
+# --- Состояние для тестов и консоли редактора ------------------------------
+func templateState() do
+    var alive = 0
+    var fsmStates = ""
+    for k, a in Actors.actors do
+        if not a["dead"] do alive += 1 end
+        fsmStates = fsmStates + a["id"] + ":" + a["fsm"].current + " "
+    end
+    return {
+        "entities": entityCount(),
+        "playerHp": Player.hp,
+        "playerDead": Player.dead,
+        "stamina": Player.stamina,
+        "yaw": Player.yaw,
+        "actors": Actors.actors.len(),
+        "alive": alive,
+        "enemies": Actors.aliveEnemies(),
+        "fsm": fsmStates,
+        "prompt": Player.prompt,
+        "dialogue": ActiveDialogue != nil,
+        "questsActive": Quests.log.active.len(),
+        "wolvesDone": Quests.log.isCompleted("wolves"),
+        "navVisited": World.nav.lastVisited,
+        "sword": PlayerInv.countOf("iron_sword"),
+        "bread": PlayerInv.countOf("bread"),
+        "spawned": enemiesSpawned,
+    }
+end
+
+# --- Тестовые хуки ---------------------------------------------------------
+# Тонкие обёртки над настоящей логикой: тесты дёргают их вместо эмуляции
+# ввода по кадрам, но исполняется тот же код, что и в игре.
+
+func testTeleport(x, z) do
+    setPosition(Player.ent, vec3(x, SPAWN_PLAYER["y"], z))
+    return getPosition(Player.ent)
+end
+
+func testTalkTo(actorId: String) do return startDialogueWith(actorId) end
+
+func testDialogueChoose(index: Int) do return chooseDialogue(index) end
+
+func testDialogueAdvance() do return advanceDialogue() end
+
+func testAttackAt(x, z) do
+    Player.lookAt(vec3(x, getPosition(Player.ent).y, z))
+    return Combat.attackPlayer()
+end
+
+func testDamagePlayer(amount: Int) do return Combat.hurtPlayer(nil, amount) end
+
+func testNotify(kind: String, target: String, n: Int) do return Quests.notify(kind, target, n) end
+
+func testPathLength(fromX, fromZ, toX, toZ) -> Int do
+    let p = World.findPath(vec3(fromX, 0, fromZ), vec3(toX, 0, toZ))
+    return len(p)
+end
+
+func testFsmState(actorId: String) do
+    let a = Actors.get(actorId)
+    if a == nil do return "missing" end
+    return a["fsm"].current
+end
+
+func testForceState(actorId: String, state: String) do
+    let a = Actors.get(actorId)
+    if a == nil do return false end
+    a["fsm"].changeState(state)
+    return a["fsm"].isIn(state)
+end
+
+let st0 = templateState()
+let actorsCount = st0["actors"]
+let enemiesAlive = st0["enemies"]
+let plotsNav = st0["navVisited"]
+let entCount = st0["entities"]
+let qActive = st0["questsActive"]
+print("[rpg_3p] world built: entities {entCount}, actors {actorsCount}, enemies {enemiesAlive}, quests {qActive}")
+
+func testActorPos(actorId: String) do
+    let a = Actors.get(actorId)
+    if a == nil do return nil end
+    let p = getPosition(a["entity"])
+    return {"x": p.x, "y": p.y, "z": p.z}
+end

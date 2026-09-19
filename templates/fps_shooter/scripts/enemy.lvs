@@ -1,0 +1,228 @@
+# ============================================================================
+#  FPS Shooter — враги
+#
+#  Поведение — конечный автомат из stdlib/fsm.lvs:
+#      Patrol  -> ходит между точками арены;
+#      Chase   -> увидел игрока (raycast без препятствий) и идёт к нему;
+#      Attack  -> в пределах дальности, стреляет с интервалом и шансом промаха;
+#      Dead    -> терминальное состояние, труп остаётся в сцене.
+#
+#  Проверка видимости выполняется raycast'ом, поэтому укрытие реально спасает:
+#  это главная тактическая механика шаблона.
+# ============================================================================
+
+class EnemySystem do
+    var enemies               # map id -> enemy
+    var arena
+    var playerEnt = nil
+    var playerHp = 0
+    var rngSeed = 987654321
+    var onPlayerHit = nil     # колбэк (damage) — main.lvs вешает сюда HUD/звук
+
+    func init(arena) do
+        this.enemies = {}
+        this.arena = arena
+        this.playerEnt = nil
+        this.playerHp = CFG_PLAYER_HP
+    end
+
+    func rand01() -> Float do
+        var x = this.rngSeed
+        x = x ~ (x << 13)
+        x = x ~ (x >> 7)
+        x = x ~ (x << 17)
+        this.rngSeed = x
+        return math.abs(x % 100000) / 100000.0
+    end
+
+    /// Заспавнить врагов по точкам арены.
+    func spawnAll() do
+        var i = 0
+        while i < CFG_ENEMY_COUNT do
+            let sp = this.arena.spawnPoints[i % len(this.arena.spawnPoints)]
+            this.create("enemy_" + str(i), vec3(sp.x + i * 1.3, sp.y, sp.z))
+            i += 1
+        end
+        return len(this.enemies)
+    end
+
+    func create(id: String, pos) do
+        let e = spawn()
+        setPosition(e, pos)
+        setField(e, "Transform", "scale", vec3(0.8, 1.8, 0.8))
+        setField(e, "MeshRenderer", "tint", color(0.75, 0.22, 0.20, 1.0))
+        addRigidBody(e, vec3(0.4, 0.9, 0.4), 2)     # 2 = Dynamic: тело реагирует на импульсы
+
+        let fsm = new StateMachine()
+        let en = {
+            "id": id, "entity": e, "hp": CFG_ENEMY_HP, "maxHp": CFG_ENEMY_HP,
+            "fsm": fsm, "dead": false, "fireTimer": 0.0,
+            "patrolTarget": this.randomFreePoint(), "repathTimer": 0.0,
+        }
+        this.enemies[id] = en
+        this.setupFsm(en)
+        fsm.changeState("Patrol")
+        return en
+    end
+
+    func setupFsm(en) do
+        let fsm = en["fsm"]
+        let self = this
+        fsm.state("Patrol", {
+            "update": |dt| { self.patrolUpdate(en, dt) }
+        })
+        fsm.state("Chase", {
+            "update": |dt| { self.chaseUpdate(en, dt) }
+        })
+        fsm.state("Attack", {
+            "update": |dt| { self.attackUpdate(en, dt) }
+        })
+        fsm.state("Dead", {})
+
+        fsm.transition("Patrol", "Chase", || { self.canSeePlayer(en) })
+        fsm.transition("Chase", "Attack", || { self.inFireRange(en) and self.canSeePlayer(en) })
+        fsm.transition("Chase", "Patrol", || { not self.canSeePlayer(en) })
+        fsm.transition("Attack", "Chase", || { not self.inFireRange(en) or not self.canSeePlayer(en) })
+        return fsm
+    end
+
+    /// Кадровый тик.
+    func update(dt) do
+        for k, en in this.enemies do
+            if en["dead"] do continue end
+            en["fireTimer"] = math.max(0.0, en["fireTimer"] - dt)
+            en["fsm"].update(dt)
+        end
+        return nil
+    end
+
+    // -- Состояния ------------------------------------------------------------
+
+    func patrolUpdate(en, dt) do
+        let tgt = en["patrolTarget"]
+        if this.moveTowards(en, tgt, CFG_ENEMY_SPEED, dt) do
+            en["patrolTarget"] = this.randomFreePoint()
+        end
+        return nil
+    end
+
+    func chaseUpdate(en, dt) do
+        if this.playerEnt == nil do return nil end
+        this.moveTowards(en, getPosition(this.playerEnt), CFG_ENEMY_CHASE_SPEED, dt)
+        return nil
+    end
+
+    func attackUpdate(en, dt) do
+        if this.playerEnt == nil do return nil end
+        let pp = getPosition(this.playerEnt)
+        this.faceTowards(en, pp)
+        if en["fireTimer"] <= 0.0 do
+            en["fireTimer"] = CFG_ENEMY_FIRE_INTERVAL
+            # Шанс попадания меньше единицы: игрок должен успевать реагировать.
+            if this.rand01() < CFG_ENEMY_ACCURACY do
+                this.playerHp = math.max(0, this.playerHp - CFG_ENEMY_DAMAGE)
+                playSound3D(24, getPosition(en["entity"]), 0.9)
+                if this.onPlayerHit != nil do this.onPlayerHit(CFG_ENEMY_DAMAGE) end
+            end
+        end
+        return nil
+    end
+
+    // -- Движение -------------------------------------------------------------
+
+    /// Идти к точке; true = дошли.
+    func moveTowards(en, target, speed, dt) -> Bool do
+        let p = getPosition(en["entity"])
+        let dx = target.x - p.x
+        let dz = target.z - p.z
+        let dist = math.sqrt(dx * dx + dz * dz)
+        if dist < 0.6 do return true end
+        let step = speed * dt
+        let k = if step < dist do step / dist else 1.0 end
+        setPosition(en["entity"], vec3(p.x + dx * k, p.y, p.z + dz * k))
+        this.faceTowards(en, target)
+        return false
+    end
+
+    func faceTowards(en, target) do
+        let p = getPosition(en["entity"])
+        let dx = target.x - p.x
+        let dz = target.z - p.z
+        if math.abs(dx) < 0.001 and math.abs(dz) < 0.001 do return nil end
+        setRotationEuler(en["entity"], vec3(0, math.deg(math.atan2(dx, dz)), 0))
+        return nil
+    end
+
+    /// Свободная случайная точка арены (детерминированный ГПСЧ).
+    func randomFreePoint() do
+        var tries = 0
+        while tries < 24 do
+            let h = CFG_ARENA * 0.5 - 2.5
+            let x = (this.rand01() * 2.0 - 1.0) * h
+            let z = (this.rand01() * 2.0 - 1.0) * h
+            if this.arena.isFree(x, z) do return vec3(x, 0.9, z) end
+            tries += 1
+        end
+        return vec3(0, 0.9, 0)
+    end
+
+    // -- Запросы и урон -------------------------------------------------------
+
+    func canSeePlayer(en) -> Bool do
+        if this.playerEnt == nil do return false end
+        let from = this.eyeOf(en["entity"])
+        let to = this.eyeOf(this.playerEnt)
+        let dir = vec3Sub(to, from)
+        let dist = vec3Length(dir)
+        if dist > CFG_ENEMY_SIGHT or dist < 0.01 do return false end
+        let hit = raycast(from, vec3Mul(dir, 1.0 / dist), dist - 0.3)
+        # Луч либо ни во что не попал, либо попал ровно в игрока.
+        if not (hit["hit"]) do return true end
+        return hit["entity"] == this.playerEnt
+    end
+
+    func inFireRange(en) -> Bool do
+        if this.playerEnt == nil do return false end
+        return vec3Distance(getPosition(en["entity"]), getPosition(this.playerEnt)) <= CFG_ENEMY_FIRE_RANGE
+    end
+
+    func eyeOf(ent) do
+        let p = getPosition(ent)
+        return vec3(p.x, p.y + CFG_EYE_HEIGHT * 0.8, p.z)
+    end
+
+    func byEntity(ent) do
+        for k, en in this.enemies do
+            if en["entity"] == ent do return en end
+        end
+        return nil
+    end
+
+    /// Урон врагу. Возвращает оставшееся здоровье.
+    func damage(en, amount: Int) -> Int do
+        if en == nil or en["dead"] do return 0 end
+        var hp = en["hp"] - amount
+        if hp < 0 do hp = 0 end
+        en["hp"] = hp
+        if hp <= 0 do this.kill(en) end
+        return hp
+    end
+
+    func kill(en) do
+        en["dead"] = true
+        en["fsm"].changeState("Dead")
+        setField(en["entity"], "MeshRenderer", "tint", color(0.22, 0.20, 0.20, 1.0))
+        setField(en["entity"], "Transform", "scale", vec3(0.9, 0.3, 0.9))
+        return true
+    end
+
+    func aliveCount() -> Int do
+        var n = 0
+        for k, en in this.enemies do
+            if not en["dead"] do n += 1 end
+        end
+        return n
+    end
+
+    func get(id: String) do return this.enemies.get(id, nil) end
+end

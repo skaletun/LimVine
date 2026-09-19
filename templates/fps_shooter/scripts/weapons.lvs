@@ -1,0 +1,138 @@
+# ============================================================================
+#  FPS Shooter — оружие
+#
+#  Hitscan-модель: выстрел — это raycast из точки глаза в направлении взгляда,
+#  повёрнутом на случайный угол в пределах текущего разброса. Разброс растёт
+#  от выстрела к выстрелу и спадает со временем (bloom), отдача подбрасывает
+#  pitch камеры — вместе это даёт узнаваемое «поведение» автомата без единого
+#  снаряда в сцене.
+# ============================================================================
+
+class WeaponSystem do
+    var spec                  # таблица WPN_RIFLE
+    var ammoInMag = 0
+    var ammoReserve = 0
+    var spread = 0.0
+    var cooldown = 0.0
+    var reloading = false
+    var reloadTimer = 0.0
+    var shotsFired = 0
+    var shotsHit = 0
+    var rngSeed = 12345
+
+    func init(spec) do
+        this.spec = spec
+        this.ammoInMag = spec["magazine"]
+        this.ammoReserve = spec["reserve"]
+        this.spread = spec["spreadBase"]
+        this.cooldown = 0.0
+        this.reloading = false
+        this.reloadTimer = 0.0
+        this.shotsFired = 0
+        this.shotsHit = 0
+    end
+
+    /// Кадровый тик: кулдаун, спад разброса, таймер перезарядки.
+    func update(dt) do
+        this.cooldown = math.max(0.0, this.cooldown - dt)
+        this.spread = math.max(this.spec["spreadBase"], this.spread - this.spec["spreadRecover"] * dt)
+        if this.reloading do
+            this.reloadTimer -= dt
+            if this.reloadTimer <= 0.0 do this.finishReload() end
+        end
+        return this.cooldown
+    end
+
+    /// Детерминированный ГПСЧ (xorshift): в тестах стрельба должна быть
+    /// воспроизводимой, поэтому math.random() здесь не используется.
+    func rand01() -> Float do
+        var x = this.rngSeed
+        x = x ~ (x << 13)
+        x = x ~ (x >> 7)
+        x = x ~ (x << 17)
+        this.rngSeed = x
+        return math.abs(x % 100000) / 100000.0
+    end
+
+    /// Направление выстрела: взгляд + случайное отклонение в конусе разброса.
+    func spreadDirection(baseDir) do
+        let a = this.rand01() * math.pi * 2.0
+        let r = this.spread * math.sqrt(this.rand01())
+        # Отклонение в локальных осях «право/вверх», перпендикулярных лучу.
+        let right = vec3Normalize(vec3(baseDir.z, 0, -baseDir.x))
+        let up = vec3(0, 1, 0)
+        var d = baseDir
+        d = vec3Add(d, vec3Mul(right, math.cos(a) * r))
+        d = vec3Add(d, vec3Mul(up, math.sin(a) * r))
+        return vec3Normalize(d)
+    end
+
+    /// Выстрел. Возвращает map с результатом — его читают UI, тесты и звук.
+    func fire(eyePos, lookDir, enemies) do
+        if this.reloading do return {"shot": false, "reason": "reloading"} end
+        if this.cooldown > 0.0 do return {"shot": false, "reason": "cooldown"} end
+        if this.ammoInMag <= 0 do
+            playSound2D(21, 0.5)          # щелчок пустого магазина
+            this.startReload()
+            return {"shot": false, "reason": "empty"}
+        end
+
+        this.ammoInMag -= 1
+        this.shotsFired += 1
+        this.cooldown = 60.0 / this.spec["rpm"]
+        this.spread = math.min(this.spec["spreadMax"], this.spread + this.spec["spreadPerShot"])
+        playSound2D(20, 1.0)
+
+        let dir = this.spreadDirection(lookDir)
+        let hit = raycast(eyePos, dir, this.spec["range"])
+        if not (hit["hit"]) do return {"shot": true, "hit": false} end
+
+        # Стена поглощает пулю: враг за укрытием не получает урона.
+        let target = enemies.byEntity(hit["entity"])
+        if target == nil do
+            return {"shot": true, "hit": false, "wall": true, "point": hit["position"]}
+        end
+        if target["dead"] do return {"shot": true, "hit": false, "reason": "corpse"} end
+
+        # «Хедшот»: попадание в верхнюю треть тела (по высоте точки удара).
+        let tp = getPosition(target["entity"])
+        var dmg = this.spec["damage"]
+        var headshot = false
+        if hit["position"].y > tp.y + 0.55 do
+            headshot = true
+            dmg = int(dmg * this.spec["headshotMult"])
+        end
+        let hp = enemies.damage(target, dmg)
+        this.shotsHit += 1
+        if hp <= 0 do playSound3D(23, getPosition(target["entity"]), 1.0) end
+        return {"shot": true, "hit": true, "headshot": headshot, "damage": dmg,
+                "hp": hp, "killed": hp <= 0, "id": target["id"]}
+    end
+
+    /// Начало перезарядки (если есть запас).
+    func startReload() -> Bool do
+        if this.reloading do return false end
+        if this.ammoInMag >= this.spec["magazine"] do return false end
+        if this.ammoReserve <= 0 do return false end
+        this.reloading = true
+        this.reloadTimer = this.spec["reloadSeconds"]
+        playSound2D(22, 0.8)
+        return true
+    end
+
+    func finishReload() do
+        let need = this.spec["magazine"] - this.ammoInMag
+        let take = if need < this.ammoReserve do need else this.ammoReserve end
+        this.ammoInMag += take
+        this.ammoReserve -= take
+        this.reloading = false
+        this.reloadTimer = 0.0
+        return this.ammoInMag
+    end
+
+    /// Точность накопительно (для экрана итогов).
+    func accuracy() -> Float do
+        if this.shotsFired == 0 do return 0.0 end
+        return this.shotsHit / this.shotsFired
+    end
+end

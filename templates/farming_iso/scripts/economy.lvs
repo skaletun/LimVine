@@ -1,0 +1,84 @@
+# ============================================================================
+#  Isometric Farming — экономика и цикл дня
+#
+#  Деньги, семена и отгрузка живут в одном классе: шаблон намеренно держит
+#  экономику отдельно от «физики» грядок, чтобы её можно было заменить
+#  (магазин, цены по сезонам, контракты) без правки CropSystem.
+# ============================================================================
+
+class FarmEconomy do
+    var gold = 0
+    var inventory            # общий Inventory: семена + собранный урожай
+    var world
+    var shippedToday = 0
+    var earnedToday = 0
+    var history              # журнал дней: [{day, earned, shipped}]
+
+    func init(w, inv, startGold: Int) do
+        this.world = w
+        this.inventory = inv
+        this.gold = startGold
+        this.shippedToday = 0
+        this.earnedToday = 0
+        this.history = []
+    end
+
+    /// Выдать стартовые семена (в тесте проверяется, что их реально видно).
+    func grantStartingSeeds() do
+        for id in CROP_ORDER do
+            let n = CFG_START_SEEDS[id]
+            if n > 0 do this.inventory.add("seed_" + id, n) end
+        end
+        return this.inventory.countOf("seed_turnip")
+    end
+
+    /// Купить семена. Возвращает число купленных штук (0 = не хватило денег).
+    func buySeed(cropId: String, n: Int = 1) -> Int do
+        if not CROPS.has(cropId) do return 0 end
+        let price = CROPS[cropId]["seedPrice"] * n
+        if this.gold < price do return 0 end
+        this.gold -= price
+        this.inventory.add("seed_" + cropId, n)
+        return n
+    end
+
+    /// Отгрузить весь собранный урожай через ящик.
+    ///
+    /// Проверяется близость игрока к ящику: иначе «продажа из воздуха».
+    func ship(playerEnt) -> Int do
+        let bin = vec3(CFG_BIN_POS["x"], CFG_BIN_POS["y"], CFG_BIN_POS["z"])
+        if vec3Distance(getPosition(playerEnt), bin) > 3.0 do return -1 end
+        var earned = 0
+        var shipped = 0
+        for id in CROP_ORDER do
+            let have = this.inventory.countOf(id)
+            if have <= 0 do continue end
+            let price = int(CROPS[id]["sellPrice"] * CFG_SHIP_RATIO) * have
+            this.inventory.remove(id, have)
+            earned += price
+            shipped += have
+        end
+        this.gold += earned
+        this.shippedToday += shipped
+        this.earnedToday += earned
+        if shipped > 0 do playSound2D(4, 0.9) end
+        return earned
+    end
+
+    /// Конец дня: записать историю, сбросить счётчики, вернуть сводку.
+    func closeDay() do
+        this.history.push({"day": this.world.day, "earned": this.earnedToday, "shipped": this.shippedToday})
+        let summary = {"day": this.world.day, "earned": this.earnedToday, "shipped": this.shippedToday, "gold": this.gold}
+        this.shippedToday = 0
+        this.earnedToday = 0
+        return summary
+    end
+
+    /// Сводка для HUD одной строкой (её печатает main.lvs).
+    ///
+    /// Интерполяция поддерживает выражения в фигурных скобках, поэтому
+    /// отдельные конкатенации не нужны.
+    func hudText(ready: Int) -> String do
+        return "day {this.world.day}  gold {this.gold}  ready {ready}"
+    end
+end

@@ -1,0 +1,137 @@
+# ============================================================================
+#  Isometric Farming — построение мира
+#
+#  Мир шаблона собирается ИЗ КОДА (а не из .lvscene), чтобы шаблон был
+#  самодостаточным и запускался headless в тестах. Каждая грядка — отдельная
+#  сущность ECS с Transform и MeshRenderer: батчер движка сливает их в
+#  инстанс-батчи, поэтому 48 грядок стоят одного draw call.
+# ============================================================================
+
+/// Состояние одной грядки.
+///
+/// Хранится как обычный map, а не как компонент C++: шаблон показывает, как
+/// игровая логика живёт в скрипте, не требуя перекомпиляции движка. Ключ —
+/// строка "gx,gz", поэтому состояние сериализуемо в сохранение как есть.
+class FarmWorld do
+    var plots                 # map "gx,gz" -> {entity, tilled, crop, growth, watered}
+    var ground
+    var binEntity
+    var day = 1
+    var timeOfDay = 0.0       # 0..CFG_DAY_SECONDS
+    var cropsThisDay = 0
+
+    func init() do
+        this.plots = {}
+        this.ground = nil
+        this.binEntity = nil
+        this.day = 1
+        this.timeOfDay = 0.0
+        this.cropsThisDay = 0
+    end
+
+    /// Ключ клетки. Отдельным методом — чтобы формат ключа менялся в одном месте.
+    func key(gx, gz) -> String do return "{gx},{gz}" end
+
+    /// Построить поле: земля, грядки, ящик отгрузки.
+    func build() do
+        # Земля — одна большая плоскость (в реальном проекте это меш из ассетов).
+        this.ground = spawn()
+        setPosition(this.ground, vec3(0, -0.1, 0))
+        setField(this.ground, "Transform", "scale", vec3(CFG_GRID_W * CFG_CELL + 6, 0.2, CFG_GRID_H * CFG_CELL + 6))
+        setField(this.ground, "MeshRenderer", "tint", color(0.29, 0.55, 0.24, 1.0))
+
+        var gz = 0
+        while gz < CFG_GRID_H do
+            var gx = 0
+            while gx < CFG_GRID_W do
+                let e = spawn()
+                setPosition(e, cellToWorld(gx, gz))
+                setField(e, "Transform", "scale", vec3(CFG_CELL * 0.9, 0.15, CFG_CELL * 0.9))
+                setField(e, "MeshRenderer", "tint", color(0.45, 0.36, 0.25, 1.0))
+                this.plots[this.key(gx, gz)] = {
+                    "entity": e, "gx": gx, "gz": gz,
+                    "tilled": false, "crop": nil, "growth": 0.0, "watered": false,
+                }
+                gx += 1
+            end
+            gz += 1
+        end
+
+        # Ящик отгрузки: точка сдачи урожая.
+        this.binEntity = spawn()
+        setPosition(this.binEntity, vec3(CFG_BIN_POS["x"], 0.4, CFG_BIN_POS["z"]))
+        setField(this.binEntity, "Transform", "scale", vec3(1.4, 0.9, 1.4))
+        setField(this.binEntity, "MeshRenderer", "tint", color(0.55, 0.35, 0.18, 1.0))
+        return this
+    end
+
+    /// Грядка по координатам клетки или nil, если клетки нет.
+    func plotAt(gx, gz) do
+        let k = this.key(gx, gz)
+        if this.plots.has(k) do return this.plots[k] end
+        return nil
+    end
+
+    /// Ближайшая грядка к мировой точке в радиусе reach.
+    func nearestPlot(pos, reach) do
+        let c = worldToCell(pos)
+        var best = nil
+        var bestD = reach
+        # Перебор 3x3 вокруг клетки дешевле, чем обход всего поля.
+        for dz in -1..2 do
+            for dx in -1..2 do
+                let p = this.plotAt(c["x"] + dx, c["z"] + dz)
+                if p != nil do
+                    let w = cellToWorld(p["gx"], p["gz"])
+                    let d = vec3Distance(pos, w)
+                    if d <= bestD do
+                        bestD = d
+                        best = p
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    /// Время суток 0..1 (для освещения и UI).
+    func dayProgress() -> Float do return this.timeOfDay / CFG_DAY_SECONDS end
+
+    /// Продвинуть часы дня. Возвращает true, если день сменился.
+    func advanceTime(dt) -> Bool do
+        this.timeOfDay += dt
+        if this.timeOfDay >= CFG_DAY_SECONDS do
+            this.timeOfDay -= CFG_DAY_SECONDS
+            this.day += 1
+            return true
+        end
+        return false
+    end
+
+    /// Цвет грядки отражает состояние — быстрый «визуальный отладчик» шаблона.
+    func refreshPlotTint(plot) do
+        var c = color(0.45, 0.36, 0.25, 1.0)      # сухая земля
+        if plot["tilled"] do c = color(0.33, 0.24, 0.16, 1.0) end
+        if plot["watered"] do c = color(0.24, 0.18, 0.13, 1.0) end
+        if plot["crop"] != nil do
+            let st = this.stageOf(plot)
+            # Один `end` закрывает цепочку if/elif/else, второй — внешний блок
+            # `if plot["crop"] != nil do ... end`.
+            if st >= 2 do c = color(0.85, 0.75, 0.20, 1.0)       # зрелое
+            elif st == 1 do c = color(0.35, 0.62, 0.25, 1.0)     # росток
+            else c = color(0.30, 0.45, 0.22, 1.0)
+            end
+        end
+        setField(plot["entity"], "MeshRenderer", "tint", c)
+    end
+
+    /// Стадия роста 0..3 по накопленному времени.
+    func stageOf(plot) -> Int do
+        if plot["crop"] == nil do return -1 end
+        let total = CROPS[plot["crop"]]["growSeconds"]
+        let r = plot["growth"] / total
+        if r >= 1.0 do return 2 end
+        if r >= 0.5 do return 1 end
+        return 0
+    end
+end

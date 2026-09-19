@@ -1,0 +1,51 @@
+# ============================================================================
+#  Third-Person RPG — конфигурация
+# ============================================================================
+
+import math
+
+# ---- Мир -------------------------------------------------------------------
+global CFG_WORLD_SIZE = 44        # сторона квадратной карты, м
+global CFG_NAV_CELLS = 22         # разрешение навигационной сетки (A*)
+global CFG_NAV_CELL_SIZE = 2.0    # = CFG_WORLD_SIZE / CFG_NAV_CELLS
+
+# ---- Игрок -----------------------------------------------------------------
+global CFG_PLAYER_SPEED = 4.2
+global CFG_PLAYER_RUN = 7.0
+global CFG_MOUSE_SENS = 0.16      # градусы на пиксель
+global CFG_PLAYER_HP = 100
+global CFG_INTERACT_RANGE = 3.2
+global CFG_ATTACK_RANGE = 2.4
+global CFG_ATTACK_DAMAGE = 18
+global CFG_ATTACK_COOLDOWN = 0.55 # сек
+
+# ---- NPC -------------------------------------------------------------------
+global CFG_NPC_PATROL_SPEED = 1.8
+global CFG_NPC_CHASE_SPEED = 3.4
+global CFG_NPC_AGGRO_RANGE = 9.0
+global CFG_NPC_ATTACK_RANGE = 1.9
+global CFG_NPC_ATTACK_DAMAGE = 7
+global CFG_NPC_HP = 45
+global CFG_NPC_FLEE_HP = 12       # порог бегства (демонстрация перехода FSM)
+
+# ---- Точки интереса --------------------------------------------------------
+global SPAWN_PLAYER = {"x": 0.0, "y": 0.5, "z": 6.0}
+global SPAWN_ELDER = {"x": -4.0, "y": 0.5, "z": -2.0}
+global SPAWN_SMITH = {"x": 5.0, "y": 0.5, "z": -4.0}
+global SPAWN_WOLF_A = {"x": 12.0, "y": 0.5, "z": 10.0}
+global SPAWN_WOLF_B = {"x": -13.0, "y": 0.5, "z": 12.0}
+global CAMPFIRE = {"x": 0.0, "y": 0.2, "z": 0.0}
+
+/// Ограничить точку границами мира (NPC не должны уходить за карту).
+func clampToWorld(p) do
+    let h = CFG_WORLD_SIZE * 0.5 - 1.0
+    return vec3(math.clamp(p.x, -h, h), p.y, math.clamp(p.z, -h, h))
+end
+
+# ---- Выносливость и атака --------------------------------------------------
+global CFG_STAMINA_MAX = 100
+global CFG_ATTACK_STAMINA = 12
+global CFG_STAMINA_REGEN = 14.0   # в секунду
+global CFG_CAMERA_HEIGHT = 1.6    # высота «глаз» игрока (камера/осмотр)
+global CFG_ATTACK_HEIGHT = 0.85   # высота выпуска луча атаки: уровень груди,
+                                 # чтобы попадать в коллайдеры NPC и волков

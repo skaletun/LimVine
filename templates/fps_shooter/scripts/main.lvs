@@ -1,0 +1,281 @@
+# ============================================================================
+#  FPS Shooter — точка входа
+#
+#  Игрок от первого лица: мышь крутит yaw/pitch, WASD двигает, ЛКМ/Ctrl — огонь,
+#  R — перезарядка, Space — прыжок. Оружие, враги и пикапы — отдельные системы,
+#  связанные здесь; каждая из них тестируется независимо (tests/template_tests).
+# ============================================================================
+
+global Arena = new Arena()
+Arena.build()
+
+global Enemies = new EnemySystem(Arena)
+# Враги спавнятся сразу: точки появления берёт сама EnemySystem из Arena.
+let spawnedEnemies = Enemies.spawnAll()
+global Weapon = new WeaponSystem(WPN_RIFLE)
+global Pickups = new PickupSystem()
+
+# --- Игрок -----------------------------------------------------------------
+global PlayerEnt = spawn()
+setPosition(PlayerEnt, vec3(0, 0.9, 14.0))
+setField(PlayerEnt, "Transform", "scale", vec3(0.7, 1.8, 0.7))
+setField(PlayerEnt, "MeshRenderer", "tint", color(0.88, 0.90, 0.95, 1.0))
+# Игрок — КИНЕМАТИК (BodyKind: Static=0, Kinematic=1, Dynamic=2).
+# Для кинематика источником истины является Transform (PhysicsWorld::syncFromECS),
+# поэтому скриптовое setPosition()/телепорт работают без согласования с телом.
+# Динамику оставили врагам: их отбрасывает импульсом от попадания.
+addRigidBody(PlayerEnt, vec3(0.35, 0.9, 0.35), 1)
+
+global PlayerYaw = 0.0
+global PlayerPitch = 0.0
+global PlayerHp = CFG_PLAYER_HP
+global PlayerVY = 0.0
+global PlayerGrounded = true
+global PlayerDead = false
+global KillCount = 0
+
+Enemies.playerEnt = PlayerEnt
+Enemies.onPlayerHit = |dmg| { print("[hit] player took damage") }
+Pickups.playerEnt = PlayerEnt
+
+func playerEye() do
+    let p = getPosition(PlayerEnt)
+    return vec3(p.x, p.y + CFG_EYE_HEIGHT, p.z)
+end
+
+func playerLook() do
+    let r = math.rad(PlayerYaw)
+    let pr = math.rad(PlayerPitch)
+    let cp = math.cos(pr)
+    return vec3(math.sin(r) * cp, math.sin(pr), math.cos(r) * cp)
+end
+
+/// Взгляд в конкретную точку (для тестов и «прилипания» прицела).
+func lookAtPoint(pos) do
+    let p = playerEye()
+    let d = vec3Sub(pos, p)
+    let flat = math.sqrt(d.x * d.x + d.z * d.z)
+    PlayerYaw = math.deg(math.atan2(d.x, d.z))
+    PlayerPitch = math.deg(math.atan2(d.y, flat))
+    return PlayerYaw
+end
+
+# --- Ввод ------------------------------------------------------------------
+func setupInput() do
+    createInputContext("Combat", 0)
+    mapKeyAxis("Combat", "MoveX", 65, -1.0)     # A
+    mapKeyAxis("Combat", "MoveX", 68, 1.0)      # D
+    mapKeyAxis("Combat", "MoveY", 83, -1.0)     # S
+    mapKeyAxis("Combat", "MoveY", 87, 1.0)      # W
+    mapKey("Combat", "Sprint", 340)             # Left Shift
+    mapKey("Combat", "Jump", 32)                # Space
+    mapKey("Combat", "Reload", 82)              # R
+    mapMouseButton("Combat", "Fire", 0)         # ЛКМ
+    mapKey("Combat", "Fire", 341)               # Ctrl (удобно в headless-тестах)
+    pushInputContext("Combat")
+    return true
+end
+setupInput()
+
+# --- Пикапы ----------------------------------------------------------------
+func setupPickups() do
+    Pickups.create("hp_1", "health", vec3(-6.0, 0.6, 6.0))
+    Pickups.create("hp_2", "health", vec3(9.0, 0.6, -7.0))
+    Pickups.create("ammo_1", "ammo", vec3(6.0, 0.6, 8.0))
+    Pickups.create("ammo_2", "ammo", vec3(-10.0, 0.6, -9.0))
+    return Pickups.availableCount()
+end
+let pickupCount = setupPickups()
+
+# --- Кадр ------------------------------------------------------------------
+func update(dt) do
+    Weapon.update(dt)
+    Enemies.update(dt)
+
+    updatePlayer(dt)
+
+    let pp = getPosition(PlayerEnt)
+    let got = Pickups.update(dt, pp, |kind| { applyPickup(kind) })
+
+    if inputPressed("Fire") or inputHeld("Fire") do
+        let r = Weapon.fire(playerEye(), playerLook(), Enemies)
+        if r["shot"] and r["hit"] and r["killed"] do
+            # Внутри {} интерполяции нельзя вкладывать другие скобки/кавычки,
+            # поэтому раскладываем результат выстрела в локалы.
+            KillCount += 1
+            let kid = r["id"]
+            let hs = r["headshot"]
+            print("[kill] {kid} headshot={hs}")
+        end
+    end
+    if inputPressed("Reload") do Weapon.startReload() end
+
+    if Enemies.playerHp <= 0 and not PlayerDead do
+        PlayerDead = true
+        print("[death] player is down; kills={KillCount}")
+    end
+    return dt
+end
+
+/// Движение игрока: ускорение по осям камеры, спринт, прыжок с гравитацией.
+func updatePlayer(dt) do
+    # Мышь. В headless-режиме mouseDelta() возвращает нули, поэтому тесты
+    # задают поворот через lookAtPoint().
+    let md = mouseDelta()
+    PlayerYaw = PlayerYaw + md.x * CFG_MOUSE_SENS
+    PlayerPitch = math.clamp(PlayerPitch - md.y * CFG_MOUSE_SENS, -85.0, 85.0)
+    if PlayerYaw > 180.0 do PlayerYaw -= 360.0 end
+    if PlayerYaw < -180.0 do PlayerYaw += 360.0 end
+    setRotationEuler(PlayerEnt, vec3(0, PlayerYaw, 0))
+
+    let ax = inputAxis("MoveX")
+    let ay = inputAxis("MoveY")
+    let speed = if inputHeld("Sprint") do CFG_SPRINT_SPEED else CFG_WALK_SPEED end
+    if ax != 0.0 or ay != 0.0 do
+        let r = math.rad(PlayerYaw)
+        let fx = math.sin(r)
+        let fz = math.cos(r)
+        var dx = fx * ay + fz * ax
+        var dz = fz * ay - fx * ax
+        let l = math.sqrt(dx * dx + dz * dz)
+        if l > 0.0001 do
+            dx = dx / l
+            dz = dz / l
+        end
+        let p = getPosition(PlayerEnt)
+        let half = CFG_ARENA * 0.5 - 1.2
+        let nx = math.clamp(p.x + dx * speed * dt, -half, half)
+        let nz = math.clamp(p.z + dz * speed * dt, -half, half)
+        setPosition(PlayerEnt, vec3(nx, p.y, nz))
+    end
+
+    # Прыжок и гравитация: вертикальная скорость интегрируется вручную, потому
+    # что шаблон не привязан к конкретному физическому бэкенду.
+    if inputPressed("Jump") and PlayerGrounded do
+        PlayerVY = CFG_JUMP_IMPULSE
+        PlayerGrounded = false
+        playSound2D(26, 0.5)
+    end
+    if not PlayerGrounded do
+        PlayerVY -= 18.0 * dt
+        let p = getPosition(PlayerEnt)
+        var ny = p.y + PlayerVY * dt
+        if ny <= 0.9 do
+            ny = 0.9
+            PlayerVY = 0.0
+            PlayerGrounded = true
+        end
+        setPosition(PlayerEnt, vec3(p.x, ny, p.z))
+    end
+    return nil
+end
+
+func applyPickup(kind: String) do
+    if kind == "health" do
+        Enemies.playerHp = math.min(CFG_PLAYER_HP, Enemies.playerHp + CFG_PICKUP_HEALTH)
+        let heal = CFG_PICKUP_HEALTH
+        print("[pickup] +{heal} health")
+    elif kind == "ammo" do
+        Weapon.ammoReserve += CFG_PICKUP_AMMO
+        let ammo = CFG_PICKUP_AMMO
+        print("[pickup] +{ammo} reserve ammo")
+    end
+    return kind
+end
+
+# --- Состояние для тестов и консоли редактора ------------------------------
+func templateState() do
+    return {
+        "entities": entityCount(),
+        "playerHp": Enemies.playerHp,
+        "playerDead": PlayerDead,
+        "yaw": PlayerYaw,
+        "pitch": PlayerPitch,
+        "ammoMag": Weapon.ammoInMag,
+        "ammoReserve": Weapon.ammoReserve,
+        "reloading": Weapon.reloading,
+        "shotsFired": Weapon.shotsFired,
+        "shotsHit": Weapon.shotsHit,
+        "accuracy": Weapon.accuracy(),
+        "enemies": len(Enemies.enemies),
+        "spawned": spawnedEnemies,
+        "enemiesAlive": Enemies.aliveCount(),
+        "kills": KillCount,
+        "pickups": Pickups.availableCount(),
+        "covers": len(Arena.covers),
+    }
+end
+
+# --- Тестовые хуки ---------------------------------------------------------
+func testTeleport(x, z) do
+    setPosition(PlayerEnt, vec3(x, 0.9, z))
+    return getPosition(PlayerEnt)
+end
+
+func testLookAtEnemy(id: String) do
+    let en = Enemies.get(id)
+    if en == nil do return false end
+    lookAtPoint(getPosition(en["entity"]))
+    return true
+end
+
+/// Выстрел БЕЗ разброса: тесты проверяют саму механику попаданий, поэтому
+/// разброс временно обнуляется (в игре он, разумеется, активен).
+func testFirePrecise() do
+    let saved = Weapon.spread
+    Weapon.spread = 0.0
+    let r = Weapon.fire(playerEye(), playerLook(), Enemies)
+    Weapon.spread = saved
+    return r
+end
+
+func testFire() do return Weapon.fire(playerEye(), playerLook(), Enemies) end
+
+func testReload() do return Weapon.startReload() end
+
+func testTickWeapon(seconds: Float) do
+    var t = 0.0
+    while t < seconds do
+        Weapon.update(1.0 / 60.0)
+        t += 1.0 / 60.0
+    end
+    return Weapon.cooldown
+end
+
+func testEnemyState(id: String) do
+    let en = Enemies.get(id)
+    if en == nil do return "missing" end
+    return en["fsm"].current
+end
+
+func testForceEnemyState(id: String, state: String) do
+    let en = Enemies.get(id)
+    if en == nil do return false end
+    en["fsm"].changeState(state)
+    return en["fsm"].isIn(state)
+end
+
+func testDamageEnemy(id: String, amount: Int) do
+    return Enemies.damage(Enemies.get(id), amount)
+end
+
+let st0 = templateState()
+let entCount = st0["entities"]
+let enemyCount = st0["enemies"]
+let pickupAvail = st0["pickups"]
+let coverCount = st0["covers"]
+print("[fps_shooter] arena built: entities {entCount}, enemies {enemyCount}, pickups {pickupAvail}, covers {coverCount}")
+
+func testPlayerPos() do
+    let p = getPosition(PlayerEnt)
+    return {"x": p.x, "y": p.y, "z": p.z}
+end
+
+/// Тестовый хук: нанести урон игроку напрямую (минуя врагов).
+/// Нужен, чтобы проверить лечение медпакетом: на полном здоровье pickup
+/// ничего не меняет, и утверждение «hp не уменьшился» было бы пустым.
+func testHurtPlayer(amount: Int) do
+    Enemies.playerHp = math.max(0, Enemies.playerHp - amount)
+    if Enemies.playerHp <= 0 do PlayerDead = true end
+    return Enemies.playerHp
+end

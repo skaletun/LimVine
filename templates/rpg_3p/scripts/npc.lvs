@@ -1,0 +1,315 @@
+# ============================================================================
+#  Third-Person RPG — NPC и враги
+#
+#  Поведение собрано из трёх кирпичей стандартной библиотеки:
+#    * StateMachine (stdlib/fsm.lvs)      — Idle/Patrol/Chase/Attack/Flee;
+#    * GridNav + findPath (pathfinding)   — маршрут патруля в обход домов;
+#    * корутина                          — «блуждание» между точками с паузами.
+#
+#  Состояние NPC хранится в map'е, а не в C++-компоненте: это показывает
+#  подход «данные в скрипте», при котором дизайнер добавляет новый тип NPC
+#  без перекомпиляции движка.
+# ============================================================================
+
+/// Все живые актёры (NPC + волки) в одном реестре.
+class ActorSystem do
+    var actors                # map id -> actor
+    var world                 # RpgWorld
+
+    func init(w) do
+        this.actors = {}
+        this.world = w
+    end
+
+    /// Создать актёра. @p faction: "village" (дружелюбный) или "wild" (враг).
+    func create(id: String, faction: String, pos, tint, hp: Int) do
+        let e = spawn()
+        setPosition(e, pos)
+        setField(e, "Transform", "scale", vec3(0.7, 1.7, 0.7))
+        setField(e, "MeshRenderer", "tint", tint)
+        addRigidBody(e, vec3(0.35, 0.85, 0.35), 1)   # кинематик: NPC водится скриптом
+
+        let fsm = new StateMachine()
+        let a = {
+            "id": id, "entity": e, "faction": faction,
+            "hp": hp, "maxHp": hp, "fsm": fsm,
+            "home": pos, "target": nil, "path": [], "pathIx": 0,
+            "attackCooldown": 0.0, "wanderTimer": 0.0, "dead": false
+        }
+        this.actors[id] = a
+        this.setupFsm(a)
+        fsm.changeState("Idle")
+        return a
+    end
+
+    /// Настроить конечный автомат под фракцию актёра.
+    func setupFsm(a) do
+        let fsm = a["fsm"]
+        let self = this
+
+        # --- Состояния -------------------------------------------------------
+        fsm.state("Idle", {
+            "enter": || { self.idleEnter(a) },
+            "update": |dt| { self.idleUpdate(a, dt) }
+        })
+        fsm.state("Patrol", {
+            "enter": || { self.patrolEnter(a) },
+            "update": |dt| { self.patrolUpdate(a, dt) }
+        })
+        fsm.state("Chase", {
+            "update": |dt| { self.chaseUpdate(a, dt) }
+        })
+        fsm.state("Attack", {
+            "update": |dt| { self.attackUpdate(a, dt) }
+        })
+        fsm.state("Flee", {
+            "enter": || { self.fleeEnter(a) },
+            "update": |dt| { self.fleeUpdate(a, dt) }
+        })
+
+        # --- Переходы --------------------------------------------------------
+        # Враг видит игрока -> погоня. Дружелюбный NPC никогда не агрится.
+        fsm.transition("Idle", "Chase", || { self.canSeePlayer(a) })
+        fsm.transition("Patrol", "Chase", || { self.canSeePlayer(a) })
+        fsm.transition("Chase", "Attack", || { self.inAttackRange(a) })
+        fsm.transition("Attack", "Chase", || { not self.inAttackRange(a) })
+        # Мало здоровья -> бегство (демонстрация условного перехода).
+        fsm.transition("Chase", "Flee", || { a["hp"] <= CFG_NPC_FLEE_HP })
+        fsm.transition("Attack", "Flee", || { a["hp"] <= CFG_NPC_FLEE_HP })
+        # Цель потеряна -> обратно к патрулю.
+        fsm.transition("Chase", "Idle", || { a["target"] == nil })
+        fsm.transition("Flee", "Idle", || { not self.canSeePlayer(a) })
+        # Дружелюбные NPC чередуют стояние и обход деревни.
+        fsm.transition("Idle", "Patrol", || { a["faction"] == "village" and a["fsm"].elapsed() > 2.5 })
+        fsm.transition("Patrol", "Idle", || { a["faction"] == "village" and a["fsm"].elapsed() > 6.0 })
+        return fsm
+    end
+
+    /// Кадровый тик всех актёров.
+    func update(dt, playerEnt) do
+        for k, a in this.actors do
+            if a["dead"] do continue end
+            a["target"] = playerEnt
+            a["attackCooldown"] = math.max(0.0, a["attackCooldown"] - dt)
+            a["fsm"].update(dt)
+        end
+        return nil
+    end
+
+    // -- Состояния ------------------------------------------------------------
+
+    func idleEnter(a) do
+        a["path"] = []
+        a["pathIx"] = 0
+        return nil
+    end
+
+    /// В Idle дружелюбный NPC иногда «дышит»: короткий доворот к игроку.
+    func idleUpdate(a, dt) do
+        if a["faction"] != "village" do return nil end
+        if a["target"] == nil do return nil end
+        if vec3Distance(getPosition(a["entity"]), getPosition(a["target"])) < CFG_NPC_AGGRO_RANGE * 1.6 do
+            this.faceTowards(a, getPosition(a["target"]), dt * 4.0)
+        end
+        return nil
+    end
+
+    /// Patrol: построить маршрут вокруг дома и идти по нему.
+    func patrolEnter(a) do
+        let home = a["home"]
+        var pts = []
+        pts.push(vec3(home.x + 3.0, home.y, home.z))
+        pts.push(vec3(home.x + 3.0, home.y, home.z + 3.0))
+        pts.push(vec3(home.x, home.y, home.z + 3.0))
+        a["path"] = []
+        for p in pts do
+            let route = this.world.findPath(getPosition(a["entity"]), p)
+            for step in route do a["path"].push(step) end
+        end
+        a["pathIx"] = 0
+        return len(a["path"])
+    end
+
+    func patrolUpdate(a, dt) do
+        this.followPath(a, dt, CFG_NPC_PATROL_SPEED)
+        return nil
+    end
+
+    func chaseUpdate(a, dt) do
+        if a["target"] == nil do return nil end
+        # Перестроение маршрута раз в ~0.4 с: каждый кадр считать A* дорого.
+        a["wanderTimer"] = a["wanderTimer"] - dt
+        if a["wanderTimer"] <= 0.0 do
+            a["wanderTimer"] = 0.4
+            a["path"] = this.world.findPath(getPosition(a["entity"]), getPosition(a["target"]))
+            a["pathIx"] = 0
+        end
+        this.followPath(a, dt, CFG_NPC_CHASE_SPEED)
+        return nil
+    end
+
+    func attackUpdate(a, dt) do
+        if a["target"] == nil do return nil end
+        this.faceTowards(a, getPosition(a["target"]), dt * 10.0)
+        if a["attackCooldown"] <= 0.0 do
+            a["attackCooldown"] = 1.1
+            # Урон игроку наносит боевая система (см. combat.lvs): NPC знает
+            # только «я бью в ближнем бою», а не как устроено здоровье игрока.
+            # combat.lvs объявляет глобальный Combat; метод-обработчик урона
+            # игрока вызывается напрямую, без проверок типа.
+            Combat.hurtPlayer(a, CFG_NPC_ATTACK_DAMAGE)
+            playSound3D(6, getPosition(a["entity"]), 0.8)
+        end
+        return nil
+    end
+
+    func fleeEnter(a) do
+        # Бежим от игрока: точка за спиной на 8 метров.
+        let me = getPosition(a["entity"])
+        var away = me
+        if a["target"] != nil do
+            let t = getPosition(a["target"])
+            away = clampToWorld(vec3(me.x + (me.x - t.x), me.y, me.z + (me.z - t.z)))
+        end
+        a["path"] = this.world.findPath(me, away)
+        a["pathIx"] = 0
+        return nil
+    end
+
+    func fleeUpdate(a, dt) do
+        this.followPath(a, dt, CFG_NPC_CHASE_SPEED * 1.15)
+        return nil
+    end
+
+    // -- Движение -------------------------------------------------------------
+
+    /// Идти по маршруту; по достижении точки — перейти к следующей.
+    func followPath(a, dt, speed) do
+        let path = a["path"]
+        if len(path) == 0 do return false end
+        if a["pathIx"] >= len(path) do
+            a["path"] = []
+            return false
+        end
+        let goal = path[a["pathIx"]]
+        let p = getPosition(a["entity"])
+        let to = vec3Sub(goal, p)
+        let dist = vec3Length(to)
+        if dist < 0.35 do
+            a["pathIx"] += 1
+            return true
+        end
+        let dir = vec3Mul(vec3Normalize(to), speed * dt)
+        setPosition(a["entity"], clampToWorld(vec3Add(p, dir)))
+        this.faceTowards(a, goal, dt * 8.0)
+        return true
+    end
+
+    /// Плавный доворот к точке (без мгновенных щелчков камеры/модели).
+    func faceTowards(a, targetPos, k) do
+        let p = getPosition(a["entity"])
+        let dx = targetPos.x - p.x
+        let dz = targetPos.z - p.z
+        if math.abs(dx) < 0.001 and math.abs(dz) < 0.001 do return nil end
+        let yaw = math.deg(math.atan2(dx, dz))
+        setRotationEuler(a["entity"], vec3(0, yaw, 0))
+        return yaw
+    end
+
+    // -- Запросы для правил FSM ----------------------------------------------
+
+    func canSeePlayer(a) -> Bool do
+        if a["faction"] != "wild" do return false end
+        if a["target"] == nil do return false end
+        let d = vec3Distance(getPosition(a["entity"]), getPosition(a["target"]))
+        if d > CFG_NPC_AGGRO_RANGE do return false end
+        # Простая проверка линии видимости: raycast до игрока не должен
+        # встретить статическую геометрию (дома).
+        let from = getPosition(a["entity"])
+        let to = getPosition(a["target"])
+        let dir = vec3Sub(to, from)
+        let dist = vec3Length(dir)
+        if dist < 0.01 do return true end
+        let hit = raycast(from, vec3Mul(dir, 1.0 / dist), dist - 0.4)
+        return not (hit["hit"])
+    end
+
+    func inAttackRange(a) -> Bool do
+        if a["target"] == nil do return false end
+        return vec3Distance(getPosition(a["entity"]), getPosition(a["target"])) <= CFG_NPC_ATTACK_RANGE
+    end
+
+    /// Получить актёра по его сущности (нужно боевой системе).
+    func byEntity(ent) do
+        for k, a in this.actors do
+            if a["entity"] == ent do return a end
+        end
+        return nil
+    end
+
+    /// Живые враги в радиусе (для квеста «зачисти поляну»).
+    func aliveEnemies() -> Int do
+        var n = 0
+        for k, a in this.actors do
+            if a["faction"] == "wild" and not a["dead"] do n += 1 end
+        end
+        return n
+    end
+
+    /// Нанести урон актёру. Используется боевой системой и атакой игрока.
+    ///
+    /// Здоровье хранится в данных актёра (map), а НЕ в C++-компоненте: шаблон
+    /// намеренно держит игровые атрибуты в скрипте, чтобы их можно было
+    /// менять и перезагружать на лету (см. ScriptWorld::hotReload).
+    func damage(target, sourcePos, amount: Int) -> Int do
+        if target == nil do return 0 end
+        if target["dead"] do return 0 end
+        var hp = target["hp"] - amount
+        if hp < 0 do hp = 0 end
+        target["hp"] = hp
+        # Отбрасывание: импульс вдоль линии «источник -> цель».
+        if sourcePos != nil do
+            let dir = vec3Normalize(vec3Sub(getPosition(target["entity"]), sourcePos))
+            applyImpulse(target["entity"], vec3Mul(dir, 4.5))
+        end
+        if hp <= 0 do
+            target["dead"] = true
+            target["fsm"].changeState("Idle")
+            setField(target["entity"], "MeshRenderer", "tint", color(0.25, 0.25, 0.25, 1.0))
+            setField(target["entity"], "Transform", "scale", vec3(0.8, 0.2, 0.8))
+        end
+        return hp
+    end
+
+    /// Ближайший живой актёр в секторе перед точкой @p from.
+    ///
+    /// Используется автонаведением ближнего боя (см. CombatSystem.attackPlayer):
+    /// условие «в секторе» задано косинусом угла между направлением взгляда и
+    /// вектором на актёра, поэтому удар не достаёт врага за спиной.
+    func nearestInFront(from, dir, range) do
+        var best = nil
+        var bestScore = 0.0
+        for k, a in this.actors do
+            if a["dead"] do continue end
+            let to = vec3Sub(getPosition(a["entity"]), from)
+            let dist = vec3Length(to)
+            if dist > range or dist < 0.0001 do continue end
+            # Косинус угла в горизонтальной плоскости (pitch не учитываем:
+            # удар мечом не должен требовать точного попадания по высоте).
+            let flatLen = vec3Length(vec3(to.x, 0, to.z))
+            let dirLen = vec3Length(vec3(dir.x, 0, dir.z))
+            if flatLen < 0.0001 or dirLen < 0.0001 do continue end
+            let dot = (to.x * dir.x + to.z * dir.z) / (flatLen * dirLen)
+            if dot < 0.55 do continue end   # сектор примерно 56 градусов
+            let score = dot * (1.0 - dist / range)
+            if score > bestScore do
+                bestScore = score
+                best = a
+            end
+        end          # for
+        return best
+    end              # nearestInFront
+
+    /// Актёр по идентификатору (для диалогов и квестов).
+    func get(id: String) do return this.actors.get(id, nil) end
+end

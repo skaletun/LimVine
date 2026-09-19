@@ -1,0 +1,10 @@
+{
+  "id": "fps_shooter",
+  "name": "FPS Shooter",
+  "summary": "Шутер от первого лица: hitscan-оружие с разбросом и отдачей, перезарядка, ИИ врагов на FSM с патрулём и преследованием, подбираемые предметы.",
+  "engine": { "backend": "Vulkan", "physics": "Jolt", "audio": "OpenAL" },
+  "stdlib": ["fsm", "tween"],
+  "scripts": ["scripts/config.lvs", "scripts/arena.lvs", "scripts/weapons.lvs", "scripts/enemy.lvs", "scripts/pickups.lvs", "scripts/main.lvs"],
+  "input": { "contexts": ["Combat"], "actions": ["MoveX", "MoveY", "Fire", "Reload", "Sprint", "Jump"] },
+  "tags": ["fps", "shooter", "hitscan", "ai"]
+}
