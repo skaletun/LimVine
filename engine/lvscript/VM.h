@@ -317,7 +317,10 @@ public:
 
 private:
     // -- Внутренности выполнения --------------------------------------------------
+    /// Цикл интерпретатора с преобразованием исключений в RunStatus::RuntimeError.
     RunStatus run();
+    /// Собственно диспетчер инструкций; может бросить (bad_alloc из GC).
+    RunStatus runUnsafe();
     void runtimeError(std::string msg);
     void resetStack();
     ExecutionContext* mainCtx_ = nullptr;

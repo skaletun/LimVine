@@ -294,6 +294,14 @@ void ScriptWorld::tick(float dt) {
     // update(dt): аргументом передаётся deltaTime кадра.
     std::array<Value, 1> args{Value::fromNumber(dt)};
     dispatch("update", args);
+
+    // Порция сборки мусора В КОНЦЕ кадра, когда игровая логика уже отработала.
+    //
+    // Смысл инкрементального режима в том, чтобы разложить сборку по кадрам:
+    // шаг здесь ограничен бюджетом (см. GC::setStepBudget), поэтому вместо
+    // одной заметной паузы в середине геймплея получается равномерная нагрузка.
+    // В stop-the-world режиме вызов ничего не делает — сборка идёт из allocate().
+    if (vm_.gc().incremental()) vm_.gc().step();
 }
 
 void ScriptWorld::dispatch(std::string_view method, std::span<const Value> args) {
@@ -752,6 +760,56 @@ void installEngineBindings(VM& vm, EngineContext& ctx) {
     vm.registerNative("frameIndex", 0, [c](VM&, std::span<const Value>) -> Value {
         return Value::integer(c->world ? static_cast<std::int64_t>(c->world->frame().frameIndex) : 0);
     }, Cap_Math);
+
+    // ------------------------------------------------------------ Сборщик мусора
+    // Управление GC требует Cap_Debug: мод не должен провоцировать паузы в
+    // чужой игре, а вот инструменты и сама игра — могут.
+
+    /// `gcCollect()` — полная сборка немедленно. Уместно на загрузочном экране
+    /// или после выгрузки уровня, когда пауза никому не мешает.
+    vm.registerNative("gcCollect", 0, [](VM& v, std::span<const Value>) -> Value {
+        v.requireCapability(Cap_Debug, "gcCollect()");
+        return Value::integer(static_cast<std::int64_t>(v.gc().collect()));
+    }, Cap_Debug);
+
+    /// `gcStep()` — одна порция работы; true, если цикл завершился.
+    vm.registerNative("gcStep", 0, [](VM& v, std::span<const Value>) -> Value {
+        v.requireCapability(Cap_Debug, "gcStep()");
+        return Value::boolean(v.gc().step());
+    }, Cap_Debug);
+
+    /// `gcSetIncremental(on)` — переключить режим сборки.
+    vm.registerNative("gcSetIncremental", 1, [](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Debug, "gcSetIncremental()");
+        v.gc().setIncremental(a[0].truthy());
+        return Value::nil();
+    }, Cap_Debug);
+
+    /// `gcSetStepBudget(bytes)` — бюджет одного шага.
+    vm.registerNative("gcSetStepBudget", 1, [](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Debug, "gcSetStepBudget()");
+        const std::int64_t bytes = a[0].asInt();
+        v.gc().setStepBudget(bytes > 0 ? static_cast<std::size_t>(bytes) : 1);
+        return Value::nil();
+    }, Cap_Debug);
+
+    /// `gcStats()` — карта со статистикой для HUD и отладочных оверлеев.
+    vm.registerNative("gcStats", 0, [](VM& v, std::span<const Value>) -> Value {
+        const GC::Stats s = v.gc().stats();
+        Value m = v.makeMap();
+        auto* map = static_cast<ObjMap*>(m.asObject());
+        map->set(v.gc(), v.internString("objects"),     Value::integer(static_cast<std::int64_t>(s.objects)));
+        map->set(v.gc(), v.internString("bytes"),       Value::integer(static_cast<std::int64_t>(s.bytes)));
+        map->set(v.gc(), v.internString("collections"), Value::integer(static_cast<std::int64_t>(s.collections)));
+        map->set(v.gc(), v.internString("freed"),       Value::integer(static_cast<std::int64_t>(s.totalFreed)));
+        map->set(v.gc(), v.internString("steps"),       Value::integer(static_cast<std::int64_t>(s.steps)));
+        map->set(v.gc(), v.internString("lastPauseMs"), Value::fromNumber(s.lastPauseMs));
+        map->set(v.gc(), v.internString("maxPauseMs"),  Value::fromNumber(s.maxPauseMs));
+        const char* phase = s.phase == GC::Phase::Mark  ? "mark"
+                          : s.phase == GC::Phase::Sweep ? "sweep" : "idle";
+        map->set(v.gc(), v.internString("phase"), v.internString(phase));
+        return m;
+    }, Cap_Debug);
 }
 
 } // namespace lv::scripting

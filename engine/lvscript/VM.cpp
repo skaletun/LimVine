@@ -582,6 +582,9 @@ void VM::closeUpvalues(std::uint32_t fromIndex) {
         ObjUpvalue* uv = openUpvalues_;
         uv->closed = *uv->location;
         uv->location = &uv->closed;
+        // Значение переезжает из стека (корень) в кучу: если upvalue уже
+        // чёрный, для инкрементального GC это новая ссылка.
+        gc_.writeBarrier(uv, uv->closed);
         openUpvalues_ = uv->nextOpen;
     }
 }
@@ -624,6 +627,7 @@ bool VM::doReturn() {
             ObjCoroutine* co = ctx_->coroutine;
             co->state = ObjCoroutine::State::Dead;
             co->yieldValue = result;
+            gc_.writeBarrier(co, result);
             ExecutionContext* parent = co->parent;
             if (parent && parent->frameCount > 0) {
                 parent->top = co->savedTop;
@@ -875,6 +879,22 @@ RunStatus VM::tickRun() {
 //  Главный цикл интерпретатора
 // ---------------------------------------------------------------------------
 RunStatus VM::run() {
+    // Внешняя обёртка: любое исключение, всплывшее из интерпретатора,
+    // превращается в ошибку скрипта. Главный источник — std::bad_alloc из
+    // GC::reallocate при исчерпании лимита памяти песочницы; мод не должен
+    // ронять редактор или игру. Сам цикл живёт в runUnsafe().
+    try {
+        return runUnsafe();
+    } catch (const std::bad_alloc&) {
+        runtimeError("script memory limit exceeded (sandbox)");
+        return RunStatus::RuntimeError;
+    } catch (const std::exception& ex) {
+        runtimeError(std::string("internal error: ") + ex.what());
+        return RunStatus::RuntimeError;
+    }
+}
+
+RunStatus VM::runUnsafe() {
     if (!ctx_ || ctx_->frameCount == 0) return RunStatus::Ok;
 
 #define BINARY_ARITH(OPSYM, EXPR)                                                     \
@@ -995,7 +1015,11 @@ RunStatus VM::run() {
         case Op::GetUpvalue: { PUSH(*frame->closure->upvalues[oper]->location); break; }
         case Op::SetUpvalue: {
             // Снимает значение (единый контракт со SetGlobal); см. Op::SetLocal.
-            *frame->closure->upvalues[oper]->location = POP();
+            ObjUpvalue* uv = frame->closure->upvalues[oper];
+            const Value v = POP();
+            *uv->location = v;
+            // Закрытый upvalue — обычный кучевой объект и может быть уже чёрным.
+            gc_.writeBarrier(uv, v);
             break;
         }
         case Op::GetGlobal: {
@@ -1253,6 +1277,7 @@ RunStatus VM::run() {
                     if (i < 0 || i >= static_cast<std::int64_t>(arr->count))
                         RUNTIME_ERR("array index out of range in assignment");
                     arr->items[i] = val;
+                    gc_.writeBarrier(arr, val);   // трёхцветная инварианта
                     break;
                 }
                 case ObjHeader::Type::Map:     static_cast<ObjMap*>(o)->set(gc_, key, val); break;
@@ -1328,6 +1353,7 @@ RunStatus VM::run() {
             auto* a = static_cast<ObjArray*>(arr.asObject());
             a->grow(gc_, a->count + 1);
             a->items[a->count++] = val;
+            gc_.writeBarrier(a, val);   // массив мог уже почернеть в фазе Mark
             PUSH(arr);
             break;
         }
@@ -1357,7 +1383,10 @@ RunStatus VM::run() {
             auto* dst = static_cast<ObjArray*>(arr.asObject());
             auto* s = static_cast<ObjArray*>(src.asObject());
             dst->grow(gc_, dst->count + s->count);
-            for (std::uint32_t i = 0; i < s->count; ++i) dst->items[dst->count++] = s->items[i];
+            for (std::uint32_t i = 0; i < s->count; ++i) {
+                dst->items[dst->count++] = s->items[i];
+                gc_.writeBarrier(dst, s->items[i]);
+            }
             PUSH(arr);
             break;
         }
@@ -1686,6 +1715,10 @@ RunStatus VM::run() {
                     } else {
                         cl->upvalues[i] = frame->closure->upvalues[index];
                     }
+                    // Замыкание могло почернеть между аллокацией и заполнением
+                    // массива upvalue (аллокация ObjUpvalue выше способна
+                    // продвинуть инкрементальную разметку).
+                    gc_.writeBarrierObject(cl, cl->upvalues[i]);
                 }
             }
             PUSH(Value::object(cl));
@@ -1737,6 +1770,7 @@ RunStatus VM::run() {
             if (static_cast<ObjClass*>(sv->asObject()) == cls)
                 RUNTIME_ERR(format("class '{}' cannot inherit from itself", std::string(cls->name->view())));
             cls->superclass = static_cast<ObjClass*>(sv->asObject());
+            gc_.writeBarrierObject(cls, cls->superclass);
             break;
         }
         case Op::ClassMethod: case Op::StaticMethod: {
@@ -1747,8 +1781,10 @@ RunStatus VM::run() {
             auto* cls = static_cast<ObjClass*>(fn->constants[clsConst].asObject());
             cls->methods->set(gc_, Value::object(nm), closure);
             if (nm->view() == "init" && closure.isObject() &&
-                closure.asObject()->type == ObjHeader::Type::Closure)
+                closure.asObject()->type == ObjHeader::Type::Closure) {
                 cls->initializer = static_cast<ObjClosure*>(closure.asObject());
+                gc_.writeBarrierObject(cls, cls->initializer);
+            }
             break;
         }
         case Op::ClassField: {
@@ -1847,6 +1883,7 @@ RunStatus VM::run() {
             if (!co) RUNTIME_ERR("'yield' used outside of a coroutine");
             const Value yielded = oper > 0 ? POP() : Value::nil();
             co->yieldValue = yielded;
+            gc_.writeBarrier(co, yielded);
             co->state = ObjCoroutine::State::Suspended;
             ExecutionContext* parent = co->parent;
             if (parent && parent->frameCount > 0) {

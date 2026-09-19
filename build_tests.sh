@@ -52,6 +52,9 @@ simple_suite stdlib_tests    tests/stdlib_tests.cpp $LV_SRC
 # Сериализация байткода (.lvc) и дисковый кэш: round-trip, переотображение
 # таблицы имён между разными VM, устойчивость к повреждённым файлам.
 simple_suite bytecode_tests  tests/bytecode_tests.cpp $LV_SRC
+# Сборщик мусора: эквивалентность stop-the-world и инкрементального режимов,
+# write-barrier, границы пауз, лимит памяти песочницы.
+simple_suite gc_tests        tests/gc_tests.cpp $LV_SRC
 # Иерархия сущностей: Parent/Children/WorldTransform, каскад world-матриц,
 # защита от циклов и матричные хелперы (inverse/extract*).
 simple_suite hierarchy_tests tests/hierarchy_tests.cpp engine/ecs/Registry.cpp \

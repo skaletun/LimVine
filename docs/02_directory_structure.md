@@ -89,6 +89,7 @@ limvine/
 │   ├── ecs_tests.cpp           #   13
 │   ├── hierarchy_tests.cpp     #   иерархия + матричные хелперы — 44
 │   ├── bytecode_tests.cpp      #   .lvc round-trip и дисковый кэш — 74
+│   ├── gc_tests.cpp            #   сборщик мусора, инкрементальный режим — 60
 │   ├── render_tests.cpp        #   15
 │   ├── input_tests.cpp         #   17
 │   ├── job_tests.cpp           #   6
@@ -104,7 +105,7 @@ limvine/
 │   ├── 03_lvscript_spec.md     #   спецификация языка + биндинги движка
 │   └── 04_engine_systems.md    #   API подсистем и рецепты
 │
-├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 12 тестов
+├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 13 тестов
 ├── build_tests.sh              # то же самое без cmake (g++ напрямую)
 └── README.md                   # быстрый старт, состав движка, обзор языка и шаблонов
 ```

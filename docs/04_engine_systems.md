@@ -473,7 +473,7 @@ parallelForRange(0, n, 256, [&](int lo, int hi) { /* чанк */ });
 | Панели без окна | `limvine-editor --dump-panels [template] [--frames N]` |
 | Профилировщик VM | `vm.setProfiling(true)` → `profile_.instructions/calls/returns` |
 | Wireframe физики | `PhysicsWorld::collectDebugLines(out, color)` |
-| Все self-test'ы | `bash build_tests.sh` (12 сьютов, 413 проверок, headless) |
+| Все self-test'ы | `bash build_tests.sh` (13 сьютов, 473 проверки, headless) |
 
 > На машинах с 1–2 ГБ ОЗУ линковка тяжёлых сьютов с `-O2` может упасть без
 > сообщения (collect2/ld). В `build_tests.sh` для них используется `-O1`
