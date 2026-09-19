@@ -14,18 +14,10 @@
  *    поэтому он вынесен в одну функцию и вызывается во всех ветках.
  */
 #include "VM.h"
-#include <cstdio>
-#include <cstdlib>
 #include "Scheduler.h"
 
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
-#include <cstdlib>
-#include <cstdlib>
-#include <cstdlib>
-#include <cstdlib>
-#include <cstdlib>
 #include <cstdlib>
 #include <random>
 

@@ -1,0 +1,315 @@
+# ============================================================================
+#  LimVine Standard Library — character.lvs
+#  CharacterController: движение персонажа, камера, гравитация, прыжок.
+#
+#  Зачем модуль: все три шаблона движка независимо переписывали один и тот же
+#  код — поворот вектора ввода на yaw камеры, нормализация диагонали, ручная
+#  интеграция вертикальной скорости, ограничение по границам мира. Логика
+#  одинаковая, а баги в каждой копии свои (например, незамеченная диагональная
+#  скорость в 1.41 раза быстрее прямой).
+#
+#  Дизайн: контроллер НЕ читает ввод сам. Он принимает намерение движения
+#  (`move(x, y)`) и отдельно — команды `jump()` / `lookDelta()`. Это сделано
+#  ради тестируемости и переиспользования: тот же контроллер водит и игрока
+#  (ввод), и NPC (результат A* из pathfinding.lvs), и запись реплея.
+#
+#  Использование:
+#      import "character"
+#
+#      let cc = new CharacterController(myEntity)
+#      cc.speed = 6.0
+#      cc.gravity = 18.0
+#      cc.bounds(-24.0, 24.0)          # квадратная арена
+#
+#      # каждый кадр:
+#      cc.lookDelta(mouseDelta())
+#      cc.move(inputAxis("MoveX"), inputAxis("MoveY"))
+#      if inputPressed("Jump") do cc.jump() end
+#      cc.update(dt)
+# ============================================================================
+
+import math
+
+/// Режимы ориентации персонажа.
+#   "camera"  — вперёд = туда, куда смотрит камера (FPS, RPG от 3-го лица)
+#   "world"   — оси ввода совпадают с осями мира (изометрия, top-down)
+#   "none"    — контроллер не трогает поворот (его задаёт игровая логика)
+
+class CharacterController do
+    var ent
+
+    # --- настройки (меняются напрямую после создания) -----------------------
+    var speed = 4.0             # скорость шага, единиц/сек
+    var runSpeed = 7.0          # скорость бега (см. setRunning)
+    var mode = "camera"         # camera | world | none
+    var mouseSens = 0.12
+    var pitchMin = -85.0
+    var pitchMax = 85.0
+    var gravity = 0.0           # 0 = гравитация выключена (изометрия, top-down)
+    var jumpImpulse = 7.0
+    var groundY = 0.0           # уровень «пола» для простых сцен
+    var faceMovement = false    # поворачивать модель по направлению движения
+    var turnRate = 0.0          # град/сек; 0 = мгновенный поворот
+
+    # --- состояние ----------------------------------------------------------
+    var yaw = 0.0
+    var pitch = 0.0
+    var velY = 0.0
+    var grounded = true
+    var running = false
+    var moving = false
+    var lastMove = nil          # нормализованное направление прошлого кадра
+    var eyeHeight = 1.7
+
+    # границы мира (nil = без ограничений)
+    var minX = nil
+    var maxX = nil
+    var minZ = nil
+    var maxZ = nil
+
+    # накопленное намерение движения текущего кадра
+    var wantX = 0.0
+    var wantY = 0.0
+    var wantJump = false
+
+    func init(entity) do
+        this.ent = entity
+        this.lastMove = vec3(0, 0, 1)
+        return this
+    end
+
+    # ------------------------------------------------------------------ ввод
+
+    /// Задать намерение движения. Оси в диапазоне [-1, 1]:
+    /// @p x — вправо/влево, @p y — вперёд/назад.
+    ///
+    /// Вызывать до update() в том же кадре. Повторный вызов перезаписывает
+    /// намерение, а не накапливает его — иначе два источника ввода
+    /// (клавиатура и геймпад) давали бы двойную скорость.
+    func move(x, y) do
+        this.wantX = x
+        this.wantY = y
+        return this
+    end
+
+    /// Повернуть камеру на дельту мыши (map с полями x/y).
+    func lookDelta(d) do
+        if d == nil do return this end
+        this.yaw = this.yaw + d.x * this.mouseSens
+        this.pitch = math.clamp(this.pitch - d.y * this.mouseSens,
+                                this.pitchMin, this.pitchMax)
+        this.normalizeYaw()
+        return this
+    end
+
+    /// Запросить прыжок. Сработает в update(), если персонаж на земле.
+    ///
+    /// Флаг держится до следующего update(), а не до момента приземления:
+    /// «буферизация прыжка» — отдельная механика, и молча включать её в
+    /// базовый контроллер значило бы менять ощущение управления без спроса.
+    func jump() do
+        this.wantJump = true
+        return this
+    end
+
+    func setRunning(on) do
+        this.running = on
+        return this
+    end
+
+    /// Ограничить перемещение прямоугольником (или квадратом, если дано 2 числа).
+    func bounds(a, b, c, d) do
+        if c == nil do
+            this.minX = a
+            this.maxX = b
+            this.minZ = a
+            this.maxZ = b
+        else
+            this.minX = a
+            this.maxX = b
+            this.minZ = c
+            this.maxZ = d
+        end
+        return this
+    end
+
+    # ------------------------------------------------------------------ кадр
+
+    /// Один кадр симуляции. Возвращает новую позицию.
+    func update(dt) do
+        let horizontal = this.applyHorizontal(dt)
+        let vertical = this.applyVertical(dt)
+        this.wantX = 0.0
+        this.wantY = 0.0
+        this.wantJump = false
+        return getPosition(this.ent)
+    end
+
+    /// Горизонтальное перемещение с учётом режима ориентации.
+    func applyHorizontal(dt) do
+        let ax = this.wantX
+        let ay = this.wantY
+        if ax == 0.0 and ay == 0.0 do
+            this.moving = false
+            return nil
+        end
+
+        var dx = 0.0
+        var dz = 0.0
+        if this.mode == "camera" do
+            # Поворот вектора ввода на yaw камеры: «вперёд» — туда, куда смотрим.
+            let r = math.rad(this.yaw)
+            let fx = math.sin(r)
+            let fz = math.cos(r)
+            dx = fx * ay + fz * ax
+            dz = fz * ay - fx * ax
+        else
+            dx = ax
+            dz = ay
+        end
+
+        # Нормализация: без неё диагональ быстрее прямой в 1.41 раза —
+        # классический баг, живший во всех трёх шаблонах по отдельности.
+        let l = math.sqrt(dx * dx + dz * dz)
+        if l > 0.0001 do
+            dx = dx / l
+            dz = dz / l
+        else
+            this.moving = false
+            return nil
+        end
+
+        this.moving = true
+        this.lastMove = vec3(dx, 0, dz)
+
+        let v = if this.running do this.runSpeed else this.speed end
+        let p = getPosition(this.ent)
+        var nx = p.x + dx * v * dt
+        var nz = p.z + dz * v * dt
+        if this.minX != nil do nx = math.clamp(nx, this.minX, this.maxX) end
+        if this.minZ != nil do nz = math.clamp(nz, this.minZ, this.maxZ) end
+        setPosition(this.ent, vec3(nx, p.y, nz))
+
+        this.applyFacing(dx, dz, dt)
+        return vec3(nx, p.y, nz)
+    end
+
+    /// Поворот модели по направлению движения или по камере.
+    func applyFacing(dx, dz, dt) do
+        if this.mode == "none" do return nil end
+        var target = this.yaw
+        if this.faceMovement do
+            target = math.deg(math.atan2(dx, dz))
+        elif this.mode != "camera" do
+            return nil
+        end
+        if this.turnRate <= 0.0 do
+            setRotationEuler(this.ent, vec3(0, target, 0))
+            return target
+        end
+        # Плавный доворот по кратчайшей дуге.
+        var cur = this.modelYaw()
+        var diff = target - cur
+        while diff > 180.0 do diff -= 360.0 end
+        while diff < -180.0 do diff += 360.0 end
+        let step = this.turnRate * dt
+        if math.abs(diff) <= step do
+            cur = target
+        else
+            cur = cur + if diff > 0.0 do step else -step end
+        end
+        setRotationEuler(this.ent, vec3(0, cur, 0))
+        return cur
+    end
+
+    /// Текущий yaw модели (а не камеры).
+    func modelYaw() do
+        let r = getField(this.ent, "Transform", "rotation")
+        # Извлечение yaw из кватерниона (поворот только вокруг Y).
+        let siny = 2.0 * (r.w * r.y)
+        let cosy = 1.0 - 2.0 * (r.y * r.y)
+        return math.deg(math.atan2(siny, cosy))
+    end
+
+    /// Вертикальная скорость: прыжок и гравитация.
+    func applyVertical(dt) do
+        if this.gravity <= 0.0 do return nil end
+
+        if this.wantJump and this.grounded do
+            this.velY = this.jumpImpulse
+            this.grounded = false
+        end
+        if this.grounded do return nil end
+
+        this.velY -= this.gravity * dt
+        let p = getPosition(this.ent)
+        var ny = p.y + this.velY * dt
+        if ny <= this.groundY do
+            ny = this.groundY
+            this.velY = 0.0
+            this.grounded = true
+        end
+        setPosition(this.ent, vec3(p.x, ny, p.z))
+        return ny
+    end
+
+    # ----------------------------------------------------------- вспомогательное
+
+    func normalizeYaw() do
+        while this.yaw > 180.0 do this.yaw -= 360.0 end
+        while this.yaw < -180.0 do this.yaw += 360.0 end
+        return this.yaw
+    end
+
+    /// Позиция «глаз» — начало raycast'ов стрельбы и проверки видимости.
+    func eyePosition() do
+        let p = getPosition(this.ent)
+        return vec3(p.x, p.y + this.eyeHeight, p.z)
+    end
+
+    /// Единичный вектор взгляда с учётом yaw и pitch.
+    func lookDirection() do
+        let r = math.rad(this.yaw)
+        let pr = math.rad(this.pitch)
+        let cp = math.cos(pr)
+        return vec3(math.sin(r) * cp, math.sin(pr), math.cos(r) * cp)
+    end
+
+    /// Направление взгляда без наклона (для движения и наведения по земле).
+    func forward() do
+        let r = math.rad(this.yaw)
+        return vec3(math.sin(r), 0, math.cos(r))
+    end
+
+    /// Повернуться к точке. Используется тестами, катсценами и автоприцелом.
+    func lookAt(pos) do
+        let p = getPosition(this.ent)
+        this.yaw = math.deg(math.atan2(pos.x - p.x, pos.z - p.z))
+        this.normalizeYaw()
+        return this.yaw
+    end
+
+    /// Телепортация: сбрасывает вертикальную скорость, иначе персонаж
+    /// продолжит падать со скоростью, набранной до телепорта.
+    func teleport(pos) do
+        setPosition(this.ent, pos)
+        this.velY = 0.0
+        this.grounded = pos.y <= this.groundY
+        return pos
+    end
+
+    func position() do
+        return getPosition(this.ent)
+    end
+
+    /// Снимок состояния для HUD, отладки и тестов.
+    func state() do
+        let p = getPosition(this.ent)
+        return {
+            "x": p.x, "y": p.y, "z": p.z,
+            "yaw": this.yaw, "pitch": this.pitch,
+            "moving": this.moving, "running": this.running,
+            "grounded": this.grounded, "velY": this.velY
+        }
+    end
+end

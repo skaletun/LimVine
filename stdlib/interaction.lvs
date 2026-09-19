@@ -1,0 +1,301 @@
+# ============================================================================
+#  LimVine Standard Library — interaction.lvs
+#  InteractionSystem: «что произойдёт, если нажать E».
+#
+#  Зачем модуль: поиск ближайшего интерактивного объекта писался в шаблонах
+#  заново и всегда в упрощённом виде — только по дистанции. Из-за этого
+#  сундук за спиной игрока перехватывал подсказку у сундука перед ним, а
+#  объект за стеной был «доступен». Здесь это решено один раз.
+#
+#  Отбор кандидата идёт по четырём фильтрам, в порядке возрастания цены:
+#      1. дистанция        (дёшево: сравнение квадратов)
+#      2. угол обзора      (скалярное произведение)
+#      3. условие enabled  (колбэк игры: хватает ли ключа, открыт ли квест)
+#      4. видимость        (raycast — только для победителя, не для всех)
+#
+#  Порядок важен: raycast — самая дорогая проверка, поэтому она выполняется
+#  один раз для лучшего кандидата, а не N раз для всех объектов сцены.
+#
+#  Использование:
+#      import "interaction"
+#
+#      let world = new InteractionSystem()
+#      world.register(chestEnt, { "label": "Открыть сундук", "action": || openChest() })
+#      world.register(npcEnt,   { "label": "Поговорить", "range": 3.5,
+#                                 "enabled": || not npc.busy })
+#
+#      # каждый кадр:
+#      world.update(cc.position(), cc.forward())
+#      if world.prompt != "" do hud.show(world.prompt) end
+#      if inputPressed("Interact") do world.activate() end
+# ============================================================================
+
+import math
+
+/// Один интерактивный объект.
+#  Поля описания (все, кроме label, необязательны):
+#     label    — текст подсказки
+#     action   — что выполнить при активации (лямбда)
+#     range    — своя дистанция (иначе берётся defaultRange системы)
+#     enabled  — лямбда-условие доступности
+#     hold     — секунды удержания (0 = мгновенно)
+#     priority — при равенстве прочего побеждает больший
+#     once     — снять регистрацию после первой активации
+class Interactable do
+    var entity
+    var label = ""
+    var action = nil
+    var range = nil
+    var enabled = nil
+    var hold = 0.0
+    var priority = 0
+    var once = false
+    var used = false
+    var tag = ""
+
+    func init(entity, desc) do
+        this.entity = entity
+        if desc == nil do return this end
+        if desc.has("label")    do this.label = desc["label"] end
+        if desc.has("action")   do this.action = desc["action"] end
+        if desc.has("range")    do this.range = desc["range"] end
+        if desc.has("enabled")  do this.enabled = desc["enabled"] end
+        if desc.has("hold")     do this.hold = desc["hold"] end
+        if desc.has("priority") do this.priority = desc["priority"] end
+        if desc.has("once")     do this.once = desc["once"] end
+        if desc.has("tag")      do this.tag = desc["tag"] end
+        return this
+    end
+
+    /// Доступен ли объект прямо сейчас.
+    func isAvailable() do
+        if this.used do return false end
+        if not alive(this.entity) do return false end
+        if this.enabled == nil do return true end
+        return this.enabled()
+    end
+end
+
+class InteractionSystem do
+    var items                   # список Interactable
+    var defaultRange = 2.5
+    var fieldOfView = 120.0     # полный угол конуса, градусы; 360 = во все стороны
+    var requireLineOfSight = false
+    var losMask = 0             # зарезервировано под слои физики
+
+    # --- состояние текущего кадра ------------------------------------------
+    var current = nil           # выбранный Interactable или nil
+    var prompt = ""             # текст подсказки для HUD
+    var holdProgress = 0.0      # 0..1 для объектов с hold > 0
+    var lastActivated = nil
+
+    func init() do
+        this.items = []
+        return this
+    end
+
+    # ------------------------------------------------------------ регистрация
+
+    /// Зарегистрировать объект. Возвращает созданный Interactable.
+    func register(entity, desc) do
+        let it = new Interactable(entity, desc)
+        this.items.push(it)
+        return it
+    end
+
+    /// Снять регистрацию по сущности.
+    func unregister(entity) do
+        var out = []
+        var removed = 0
+        for i, it in this.items do
+            if it.entity == entity do
+                removed += 1
+            else
+                out.push(it)
+            end
+        end
+        this.items = out
+        if this.current != nil and this.current.entity == entity do
+            this.clearSelection()
+        end
+        return removed
+    end
+
+    func clear() do
+        this.items = []
+        this.clearSelection()
+        return this
+    end
+
+    func clearSelection() do
+        this.current = nil
+        this.prompt = ""
+        this.holdProgress = 0.0
+        return nil
+    end
+
+    func count() do
+        return len(this.items)
+    end
+
+    /// Число доступных прямо сейчас объектов (для отладки и тестов).
+    func availableCount() do
+        var n = 0
+        for i, it in this.items do
+            if it.isAvailable() do n += 1 end
+        end
+        return n
+    end
+
+    # ------------------------------------------------------------------ кадр
+
+    /// Пересчитать кандидата.
+    ///
+    /// @p pos     позиция игрока (обычно cc.position())
+    /// @p forward направление взгляда по горизонтали (cc.forward());
+    ///            nil — отключает проверку угла обзора
+    /// @p dt      для накопления удержания; можно не передавать
+    func update(pos, forward, dt) do
+        let best = this.pick(pos, forward)
+
+        if best == nil do
+            this.clearSelection()
+            return nil
+        end
+
+        # Смена цели сбрасывает прогресс удержания: иначе половина удержания
+        # сундука «перетекла» бы на дверь, к которой игрок повернулся.
+        if this.current == nil or this.current.entity != best.entity do
+            this.holdProgress = 0.0
+        end
+        this.current = best
+        this.prompt = best.label
+        return best
+    end
+
+    /// Выбрать лучшего кандидата по четырём фильтрам.
+    func pick(pos, forward) do
+        var best = nil
+        var bestScore = -1.0
+        var bestPriority = -999999
+
+        let cosLimit = if forward == nil or this.fieldOfView >= 360.0 do
+            -2.0
+        else
+            math.cos(math.rad(this.fieldOfView * 0.5))
+        end
+
+        for i, it in this.items do
+            if not it.isAvailable() do continue end
+
+            let reach = if it.range == nil do this.defaultRange else it.range end
+            let ip = getPosition(it.entity)
+            let dx = ip.x - pos.x
+            let dy = ip.y - pos.y
+            let dz = ip.z - pos.z
+            let d2 = dx * dx + dy * dy + dz * dz
+            if d2 > reach * reach do continue end
+
+            # Угол обзора. Сравниваем косинусы, чтобы не звать acos на каждый
+            # объект каждый кадр.
+            var facing = 1.0
+            if cosLimit > -1.5 do
+                let l = math.sqrt(dx * dx + dz * dz)
+                if l > 0.0001 do
+                    facing = (dx / l) * forward.x + (dz / l) * forward.z
+                    if facing < cosLimit do continue end
+                end
+            end
+
+            # Скоринг: ближе и «прямее» — лучше. Приоритет перебивает оба.
+            let d = math.sqrt(d2)
+            let score = facing * 2.0 - d / reach
+
+            if it.priority > bestPriority or
+               (it.priority == bestPriority and score > bestScore) do
+                bestPriority = it.priority
+                bestScore = score
+                best = it
+            end
+        end
+
+        # Видимость проверяем ТОЛЬКО у победителя: raycast дорог, а результат
+        # для проигравших всё равно не понадобится.
+        if best != nil and this.requireLineOfSight do
+            if not this.hasLineOfSight(pos, best) do return nil end
+        end
+        return best
+    end
+
+    /// Есть ли прямая видимость до объекта.
+    func hasLineOfSight(pos, it) do
+        let ip = getPosition(it.entity)
+        let dx = ip.x - pos.x
+        let dy = ip.y - pos.y
+        let dz = ip.z - pos.z
+        let dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if dist < 0.0001 do return true end
+
+        let hit = raycast(pos, vec3(dx / dist, dy / dist, dz / dist), dist)
+        if not hit["hit"] do return true end
+        # Попали в сам объект — значит между нами ничего нет.
+        return hit["entity"] == it.entity
+    end
+
+    # -------------------------------------------------------------- активация
+
+    /// Мгновенная активация (нажатие). Возвращает результат action или nil.
+    func activate() do
+        if this.current == nil do return nil end
+        if not this.current.isAvailable() do
+            this.clearSelection()
+            return nil
+        end
+        return this.fire(this.current)
+    end
+
+    /// Активация удержанием. Вызывать каждый кадр, пока клавиша зажата.
+    /// Возвращает результат action в кадре завершения, иначе nil.
+    func hold(dt) do
+        if this.current == nil do return nil end
+        if this.current.hold <= 0.0 do return this.activate() end
+
+        this.holdProgress = this.holdProgress + dt / this.current.hold
+        if this.holdProgress < 1.0 do return nil end
+        this.holdProgress = 0.0
+        return this.fire(this.current)
+    end
+
+    /// Сбросить накопленное удержание (клавишу отпустили).
+    func releaseHold() do
+        this.holdProgress = 0.0
+        return nil
+    end
+
+    func fire(it) do
+        this.lastActivated = it
+        if it.once do
+            it.used = true
+        end
+        var res = nil
+        if it.action != nil do
+            res = it.action()
+        end
+        if it.once do
+            this.clearSelection()
+        end
+        return res
+    end
+
+    /// Снимок состояния для HUD и тестов.
+    func state() do
+        return {
+            "prompt": this.prompt,
+            "hasTarget": this.current != nil,
+            "tag": if this.current == nil do "" else this.current.tag end,
+            "holdProgress": this.holdProgress,
+            "registered": len(this.items),
+            "available": this.availableCount()
+        }
+    end
+end

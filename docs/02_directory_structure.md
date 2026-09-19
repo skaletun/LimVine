@@ -72,7 +72,11 @@ limvine/
 │   ├── pathfinding.lvs         #   BinaryHeap + GridNav (A*, октидная эвристика)
 │   ├── inventory.lvs           #   ItemDef/ItemDatabase/Slot/Inventory
 │   ├── dialogue.lvs            #   граф диалогов (choices/actions/next, флаги, require)
-│   └── quest.lvs               #   Objective/Quest/QuestLog, цепочки nextQuest, journal()
+│   ├── quest.lvs               #   Objective/Quest/QuestLog, цепочки nextQuest, journal()
+│   ├── character.lvs           #   CharacterController: движение, камера,
+│   │                             #   гравитация, прыжок, границы мира
+│   └── interaction.lvs         #   InteractionSystem: дистанция + угол обзора +
+│                                 #   условие + видимость, приоритеты, hold
 │
 ├── templates/                  # игровые шаблоны (манифест + скрипты + ассеты)
 │   ├── farming_iso/            #   изометрическая ферма
@@ -102,7 +106,8 @@ limvine/
 │   ├── engine_integration_tests.cpp # скрипт ↔ движок — 27
 │   ├── editor_tests.cpp        #   панели редактора — 36
 │   ├── template_tests.cpp      #   три шаблона — 71
-│   └── scene_tests.cpp         #   .lvscene: round-trip, ссылки, битые файлы — 104
+│   ├── scene_tests.cpp         #   .lvscene: round-trip, ссылки, битые файлы — 104
+│   └── gameplay_tests.cpp      #   character/interaction на живом движке — 70
 │
 ├── docs/
 │   ├── 01_architecture.md      #   слои, ECS, конвейер LV Script, рендер, физика, jobs
@@ -110,7 +115,7 @@ limvine/
 │   ├── 03_lvscript_spec.md     #   спецификация языка + биндинги движка
 │   └── 04_engine_systems.md    #   API подсистем и рецепты
 │
-├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 14 тестов
+├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 15 тестов
 ├── build_tests.sh              # то же самое без cmake (g++ напрямую)
 └── README.md                   # быстрый старт, состав движка, обзор языка и шаблонов
 ```

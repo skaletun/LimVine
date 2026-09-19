@@ -64,6 +64,11 @@ simple_suite hierarchy_tests tests/hierarchy_tests.cpp engine/ecs/Registry.cpp \
 # сущности, восстановление иерархии и устойчивость к битым файлам.
 run_suite scene_tests tests/scene_tests.cpp $ENGINE_SRC
 
+# Геймплейные модули stdlib: CharacterController и InteractionSystem.
+# Проверяется поведение (нормализация диагонали, гравитация, угол обзора,
+# перекрытие стеной), а не факт компиляции.
+run_suite gameplay_tests tests/gameplay_tests.cpp $ENGINE_SRC
+
 run_suite engine_integration_tests tests/engine_integration_tests.cpp $ENGINE_SRC
 
 # Редактор: панели рисуются в TextUIDraw, поэтому ImGui не нужен.
