@@ -183,7 +183,10 @@ if(LV_BUILD_TESTS)
     set(LV_HEAVY_SUITES
         engine_integration_tests
         template_tests
-        editor_tests)
+        editor_tests
+        # Сериализация сцен: использует рефлексию BindingRegistry, поэтому
+        # тянет рендер, физику и звук ради их компонентов.
+        scene_tests)
 
     # Сьюты, которым хватает части исходников (быстрее собираются и линкуются).
     add_executable(lvscript_tests     tests/lvscript_tests.cpp ${LV_LVSCRIPT_SOURCES})

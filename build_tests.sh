@@ -60,6 +60,10 @@ simple_suite gc_tests        tests/gc_tests.cpp $LV_SRC
 simple_suite hierarchy_tests tests/hierarchy_tests.cpp engine/ecs/Registry.cpp \
                              engine/ecs/Hierarchy.cpp engine/ecs/World.cpp engine/core/JobSystem.cpp
 
+# Сцены (.lvscene): round-trip всех типов полей, переотображение ссылок на
+# сущности, восстановление иерархии и устойчивость к битым файлам.
+run_suite scene_tests tests/scene_tests.cpp $ENGINE_SRC
+
 run_suite engine_integration_tests tests/engine_integration_tests.cpp $ENGINE_SRC
 
 # Редактор: панели рисуются в TextUIDraw, поэтому ImGui не нужен.

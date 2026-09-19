@@ -589,7 +589,40 @@ stopSound(voice)
 let dt = deltaTime();  let t = time();  let f = frameIndex()
 ```
 
-### 10.5 Глобальные обработчики кадра
+### 10.5 Сцены и сохранения
+
+```lua
+let e = spawn()
+setName(e, "Chest")                       # имя хранится в ECS-компоненте Name
+print(getName(e))                         # "Chest"
+
+saveScene("saves/slot1.lvscene")          # атомарная запись (tmp + rename)
+
+clearScene()                              # уничтожить все сущности
+let r = loadScene("saves/slot1.lvscene")
+if r.ok do
+    print("сущностей: {r.entities}, предупреждений: {r.warnings}")
+else
+    print("ошибка: {r.error}")
+end
+```
+
+| Функция | Право | Описание |
+|---|---|---|
+| `saveScene(path) -> Bool` | `Cap_IO` | сохранить мир в `.lvscene` |
+| `loadScene(path) -> Map` | `Cap_IO` | догрузить сцену **поверх** текущей; поля `ok`, `entities`, `warnings`, `error` |
+| `clearScene()` | `Cap_Spawn` | уничтожить все сущности (системы остаются) |
+| `setName(e, s)` / `getName(e)` | `Cap_Scene` | имя сущности |
+
+> `saveScene`/`loadScene` требуют **`Cap_IO`**, а не `Cap_Scene`: это запись на
+> диск по произвольному пути. В профиле `Cap_ModSandbox` такого права нет,
+> поэтому мод не может ни перезаписать сейв игрока, ни подменить уровень.
+
+Неизвестные компоненты и поля при загрузке не роняют сцену — они попадают в
+счётчик `warnings` и в лог консоли. Это позволяет старому билду открывать
+сцены, сохранённые более новой версией движка.
+
+### 10.6 Глобальные обработчики кадра
 
 `ScriptWorld::tick(dt)` тикает планировщик и вызывает (если они определены)
 глобальные функции `update(dt)` и `fixedUpdate(dt)`. Соглашение перечислено в

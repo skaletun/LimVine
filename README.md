@@ -5,7 +5,7 @@ system**, собственный скриптовый язык **LV Script** (к
 стековая VM, GC, корутины, песочница), **Visual Scripting** поверх него и три
 готовых игровых шаблона.
 
-Всё дерево собирается и проходит **473 проверки в 13 self-test'ах без единой
+Всё дерево собирается и проходит **577 проверок в 14 self-test'ах без единой
 внешней зависимости** (headless, Null-бэкенды рендера/звука/физики, редактор
 без ImGui). Vulkan, OpenGL, Jolt, OpenAL и ImGui подключаются опциями
 `LV_WITH_*`.
@@ -16,6 +16,8 @@ ECS self-test:              13 passed     Template self-test:     71 passed
 Render self-test:           15 passed     LV Script stdlib:       26 passed
 Input self-test:            17 passed     Engine integration:     27 passed
 JobSystem self-test:         6 passed     Visual Scripting:       31 passed
+Hierarchy self-test:        44 passed     Bytecode self-test:     74 passed
+GC self-test:               60 passed     Scene self-test:       104 passed
 ```
 
 ---
@@ -25,7 +27,7 @@ JobSystem self-test:         6 passed     Visual Scripting:       31 passed
 ### Без CMake (только g++ и bash)
 
 ```bash
-bash build_tests.sh          # собрать и прогнать все 9 сьютов
+bash build_tests.sh          # собрать и прогнать все 14 сьютов
 ```
 
 ### CMake

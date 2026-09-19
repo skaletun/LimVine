@@ -47,6 +47,10 @@ limvine/
 │   ├── asset/
 │   │   └── AssetManager.h/.cpp #   конвейер ассетов, кэш (путь, mtime, хэш),
 │   │                             #   FileWatcher (polling), каскад по зависимостям
+│   ├── scene/
+│   │   └── Scene.h/.cpp        #   формат .lvscene: сохранение/загрузка мира
+│   │                             #   через рефлексию BindingRegistry, плотные
+│   │                             #   id вместо handle'ов, компонент Name
 │   ├── scripting/
 │   │   ├── EngineBindings.h/.cpp  # ScriptWorld, BindingRegistry, биндинги
 │   │   │                          # (spawn/setPosition/raycast/inputAxis/…), hotReload
@@ -97,7 +101,8 @@ limvine/
 │   ├── stdlib_tests.cpp        #   stdlib/*.lvs — 26
 │   ├── engine_integration_tests.cpp # скрипт ↔ движок — 27
 │   ├── editor_tests.cpp        #   панели редактора — 36
-│   └── template_tests.cpp      #   три шаблона — 71
+│   ├── template_tests.cpp      #   три шаблона — 71
+│   └── scene_tests.cpp         #   .lvscene: round-trip, ссылки, битые файлы — 104
 │
 ├── docs/
 │   ├── 01_architecture.md      #   слои, ECS, конвейер LV Script, рендер, физика, jobs
@@ -105,7 +110,7 @@ limvine/
 │   ├── 03_lvscript_spec.md     #   спецификация языка + биндинги движка
 │   └── 04_engine_systems.md    #   API подсистем и рецепты
 │
-├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 13 тестов
+├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 14 тестов
 ├── build_tests.sh              # то же самое без cmake (g++ напрямую)
 └── README.md                   # быстрый старт, состав движка, обзор языка и шаблонов
 ```

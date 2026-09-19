@@ -5,6 +5,7 @@
 #include "EngineBindings.h"
 #include "../lvscript/Compiler.h"
 #include "../lvscript/Parser.h"
+#include "../scene/Scene.h"
 
 #include <array>
 #include <cstring>
@@ -810,6 +811,68 @@ void installEngineBindings(VM& vm, EngineContext& ctx) {
         map->set(v.gc(), v.internString("phase"), v.internString(phase));
         return m;
     }, Cap_Debug);
+
+    // ------------------------------------------------------------------ Сцены
+    // Сохранение/загрузка требуют Cap_IO, а не Cap_Scene: это запись на диск
+    // произвольным путём. У профиля Cap_ModSandbox такого права нет, поэтому
+    // мод не может ни перезаписать сейв игрока, ни подменить уровень.
+
+    /// `saveScene(path) -> Bool` — сохранить текущий мир в .lvscene.
+    vm.registerNative("saveScene", 1, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_IO, "saveScene()");
+        if (!c->world) { v.runtimeErrorPublic("saveScene(): no world attached"); return Value::boolean(false); }
+        std::string err;
+        const bool ok = scene::saveSceneToFile(*c->world, a[0].toString(), {}, &err);
+        if (!ok) v.logLine("saveScene() failed: " + err);
+        return Value::boolean(ok);
+    }, Cap_IO);
+
+    /// `loadScene(path) -> Map{ok, entities, warnings, error}`.
+    /// Сцена догружается ПОВЕРХ текущей; чтобы заменить — сначала clearScene().
+    vm.registerNative("loadScene", 1, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_IO, "loadScene()");
+        Value m = v.makeMap();
+        auto* map = static_cast<ObjMap*>(m.asObject());
+        if (!c->world) {
+            map->set(v.gc(), v.internString("ok"), Value::boolean(false));
+            map->set(v.gc(), v.internString("error"), v.internString("no world attached"));
+            return m;
+        }
+        const scene::SceneLoadResult r = scene::loadSceneFromFile(*c->world, a[0].toString());
+        map->set(v.gc(), v.internString("ok"), Value::boolean(r.ok));
+        map->set(v.gc(), v.internString("entities"),
+                 Value::integer(static_cast<std::int64_t>(r.entities.size())));
+        map->set(v.gc(), v.internString("error"), v.internString(r.error));
+        // Предупреждения отдаём числом и пишем в лог: скрипту почти всегда
+        // нужен лишь факт «сцена загрузилась не идеально», а подробности
+        // читает разработчик в консоли.
+        map->set(v.gc(), v.internString("warnings"),
+                 Value::integer(static_cast<std::int64_t>(r.warnings.size())));
+        for (const std::string& w : r.warnings) v.logLine("loadScene: " + w);
+        if (!r.ok) v.logLine("loadScene() failed: " + r.error);
+        return m;
+    }, Cap_IO);
+
+    /// `clearScene()` — уничтожить все сущности (системы остаются).
+    vm.registerNative("clearScene", 0, [c](VM& v, std::span<const Value>) -> Value {
+        v.requireCapability(Cap_Spawn, "clearScene()");
+        if (c->world) c->world->registry().clear();
+        return Value::nil();
+    }, Cap_Spawn);
+
+    /// `setName(entity, name)` / `getName(entity) -> String`.
+    vm.registerNative("setName", 2, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Scene, "setName()");
+        if (!c->world) return Value::nil();
+        scene::setEntityName(c->world->registry(), argEntity(a[0]), a[1].toString());
+        return Value::nil();
+    }, Cap_Scene);
+
+    vm.registerNative("getName", 1, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Scene, "getName()");
+        if (!c->world) return v.internString("");
+        return v.internString(scene::entityName(c->world->registry(), argEntity(a[0])));
+    }, Cap_Scene);
 }
 
 } // namespace lv::scripting
