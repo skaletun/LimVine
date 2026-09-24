@@ -13,6 +13,7 @@
  * скриптов идентично игровому.
  */
 #include "scripting/TemplateRunner.h"
+#include "core/Console.h"
 #include "lvscript/Bytecode.h"
 #include "lvscript/Compiler.h"
 #include "lvscript/Parser.h"
@@ -67,6 +68,7 @@ bool parseArgs(int argc, char** argv, Options& o) {
 } // namespace
 
 int main(int argc, char** argv) {
+    lv::core::initConsole();
     Options opt;
     if (!parseArgs(argc, argv, opt)) return 2;
 

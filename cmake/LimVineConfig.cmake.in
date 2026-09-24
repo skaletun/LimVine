@@ -1,0 +1,12 @@
+@PACKAGE_INIT@
+
+# Конфигурационный пакет LimVine: генерируется корнем CMakeLists.txt.
+# Использование в проекте-потребителе:
+#   find_package(LimVine 0.1 REQUIRED)
+#   target_link_libraries(mygame PRIVATE limvine::limvine)
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/LimVineTargets.cmake")
+
+check_required_components(LimVine)
