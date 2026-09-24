@@ -12,14 +12,20 @@
  *   lvcook check templates/rpg_3p      # проверить один шаблон
  *   lvcook bundle templates/farming_iso -o /tmp/farming.lvs
  *                                      # собрать шаблон в один файл (дистрибуция)
+ *   lvcook compile [path...]           # скомпилировать .lvs в кэш .lvc
+ *   lvcook clean                       # очистить кэш байткода
  *   lvcook list                        # список шаблонов и их зависимостей
  *
- * Примечание о кэше байткода (.lvc): контейнер BytecodeModule объявлен в
- * engine/lvscript/Bytecode.h, но его serialize/deserialize ещё не реализованы,
- * поэтому lvcook пока НЕ пишет .lvc — он лишь проверяет, что модуль
- * компилируется, и (для bundle) склеивает исходники в порядке загрузки.
+ * Кэш байткода (.lvc)
+ * -------------------
+ * `lvcook compile` прогоняет исходники через компилятор и сохраняет результат
+ * в `.lvcache/` (см. engine/lvscript/BytecodeCache.h). При запуске игры и
+ * редактора актуальный кэш загружается вместо повторной компиляции; валидность
+ * определяется версией формата и FNV-1a хэшем текста исходника, поэтому кэш
+ * безопасно коммитить, удалять и переносить между машинами.
  */
 #include "lvscript/Bytecode.h"
+#include "lvscript/BytecodeCache.h"
 #include "lvscript/Compiler.h"
 #include "lvscript/Parser.h"
 #include "lvscript/Stdlib.h"
@@ -190,14 +196,119 @@ int cmdList() {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+//  compile / clean — кэш байткода (.lvc)
+// ---------------------------------------------------------------------------
+
+/// Собрать список .lvs по путям (файл или каталог); по умолчанию — stdlib + templates.
+std::vector<fs::path> collectScripts(const std::vector<std::string>& args) {
+    std::vector<fs::path> files;
+    auto addTree = [&](const fs::path& root) {
+        std::error_code ec;
+        if (!fs::exists(root, ec)) return;
+        if (fs::is_regular_file(root, ec)) { files.push_back(root); return; }
+        for (auto it = fs::recursive_directory_iterator(root, ec);
+             !ec && it != fs::recursive_directory_iterator(); ++it)
+            if (it->is_regular_file(ec) && it->path().extension() == ".lvs")
+                files.push_back(it->path());
+    };
+    if (args.empty()) { addTree("stdlib"); addTree("templates"); }
+    else for (const std::string& a : args) addTree(a);
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+int cmdCompile(const std::vector<std::string>& args, bool quiet, const fs::path& cacheDir) {
+    const std::vector<fs::path> files = collectScripts(args);
+    if (files.empty()) { std::fprintf(stderr, "no .lvs files found\n"); return 1; }
+
+    lv::BytecodeCache cache(cacheDir);
+    int failed = 0, written = 0, reused = 0;
+
+    for (const fs::path& path : files) {
+        const std::string source = readAll(path);
+        if (source.empty()) {
+            std::fprintf(stderr, "[FAIL] cannot read %s\n", path.string().c_str());
+            ++failed;
+            continue;
+        }
+
+        // Актуальный кэш переиспользуем: повторная компиляция не нужна.
+        {
+            lv::VM probe;
+            lv::installStdlib(probe);
+            if (cache.load(probe, path, source)) {
+                ++reused;
+                if (!quiet) std::printf("[ cached ] %s\n", path.string().c_str());
+                continue;
+            }
+        }
+
+        // Каждый файл компилируется в собственной VM: индексы интернированных
+        // имён не должны протекать между модулями (в .lvc пишется собственная
+        // таблица имён, но изоляция делает результат детерминированным).
+        lv::VM vm;
+        lv::installStdlib(vm);
+
+        lv::DiagnosticList diags;
+        lv::Module mod = lv::parseSource(source, path.string(), diags);
+        bool hasError = false;
+        for (const lv::Diagnostic& d : diags) {
+            if (d.severity == lv::DiagSeverity::Error) { hasError = true; ++g_errors; }
+            else ++g_warnings;
+            if (!quiet || d.severity == lv::DiagSeverity::Error)
+                std::fprintf(stderr, "%s\n", d.toString().c_str());
+        }
+        if (hasError) { ++failed; continue; }
+
+        lv::Compiler compiler(vm);
+        lv::DiagnosticList cdiags;
+        lv::ObjFunction* fn = compiler.compile(mod, cdiags);
+        for (const lv::Diagnostic& d : cdiags) {
+            if (d.severity == lv::DiagSeverity::Error) { hasError = true; ++g_errors; }
+            else ++g_warnings;
+            if (!quiet || d.severity == lv::DiagSeverity::Error)
+                std::fprintf(stderr, "%s\n", d.toString().c_str());
+        }
+        if (!fn || hasError) { ++failed; continue; }
+
+        lv::BytecodeModule module;
+        module.entry = fn;
+        module.name = path.string();
+        if (cache.store(vm, path, source, module)) {
+            ++written;
+            if (!quiet)
+                std::printf("[compiled] %s -> %s\n", path.string().c_str(),
+                            cache.pathFor(path).string().c_str());
+        } else {
+            std::fprintf(stderr, "[FAIL] cannot write cache for %s\n", path.string().c_str());
+            ++failed;
+        }
+    }
+
+    std::printf("\ncompiled %d, reused %d, failed %d (cache: %s)\n",
+                written, reused, failed, cacheDir.string().c_str());
+    return failed == 0 ? 0 : 1;
+}
+
+int cmdClean(const fs::path& cacheDir) {
+    lv::BytecodeCache cache(cacheDir);
+    const std::size_t removed = cache.clear();
+    std::printf("removed %zu cached module(s) from %s\n", removed, cacheDir.string().c_str());
+    return 0;
+}
+
 void usage() {
     std::printf(
         "LimVine content cooker\n"
-        "  lvcook check  [path...]              проверить .lvs / шаблоны (по умолчанию всё)\n"
-        "  lvcook bundle <template-dir> [-o f]  собрать шаблон в один .lvs\n"
+        "  lvcook check   [path...]             проверить .lvs / шаблоны (по умолчанию всё)\n"
+        "  lvcook compile [path...]             скомпилировать .lvs в кэш байткода (.lvc)\n"
+        "  lvcook clean                         очистить кэш байткода\n"
+        "  lvcook bundle  <template-dir> [-o f] собрать шаблон в один .lvs\n"
         "  lvcook list                          список шаблонов и их зависимостей\n"
         "\n"
-        "  --quiet    печатать только ошибки\n"
+        "  --quiet            печатать только ошибки\n"
+        "  --cache-dir <dir>  каталог кэша (по умолчанию .lvcache)\n"
         "Код возврата: 0 — ошибок нет, 1 — есть ошибки компиляции/чтения.\n");
 }
 
@@ -207,17 +318,21 @@ int main(int argc, char** argv) {
     std::vector<std::string> args;
     std::string cmd;
     bool quiet = false;
+    fs::path cacheDir = ".lvcache";
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "-h" || a == "--help") { usage(); return 0; }
         else if (a == "--quiet") quiet = true;
+        else if (a == "--cache-dir" && i + 1 < argc) cacheDir = argv[++i];
         else if (cmd.empty()) cmd = a;
         else args.push_back(a);
     }
     if (cmd.empty()) { usage(); return 2; }
-    if (cmd == "check")  return cmdCheck(args, quiet);
-    if (cmd == "bundle") return cmdBundle(args);
-    if (cmd == "list")   return cmdList();
+    if (cmd == "check")   return cmdCheck(args, quiet);
+    if (cmd == "compile") return cmdCompile(args, quiet, cacheDir);
+    if (cmd == "clean")   return cmdClean(cacheDir);
+    if (cmd == "bundle")  return cmdBundle(args);
+    if (cmd == "list")    return cmdList();
     std::fprintf(stderr, "unknown command: %s\n", cmd.c_str());
     usage();
     return 2;

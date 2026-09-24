@@ -5,6 +5,7 @@
 #include "EngineBindings.h"
 #include "../lvscript/Compiler.h"
 #include "../lvscript/Parser.h"
+#include "../scene/Scene.h"
 
 #include <array>
 #include <cstring>
@@ -138,9 +139,10 @@ Value readField(VM& vm, const void* base, const FieldBinding& f) {
             return m;
         }
         case FieldBinding::Kind::String: {
-            // Строковые поля компонент редки; поддерживаем std::string.
-            std::string s; std::memcpy(&s, p, sizeof(std::string));
-            return vm.internString(s);
+            // Строковые поля компонент редки; поддерживаем std::string через
+            // вызов копирующего конструктора (не memcpy: у SSO-строк это UB).
+            const auto* sp = reinterpret_cast<const std::string*>(p);
+            return vm.internString(*sp);
         }
     }
     return Value::nil();
@@ -293,6 +295,14 @@ void ScriptWorld::tick(float dt) {
     // update(dt): аргументом передаётся deltaTime кадра.
     std::array<Value, 1> args{Value::fromNumber(dt)};
     dispatch("update", args);
+
+    // Порция сборки мусора В КОНЦЕ кадра, когда игровая логика уже отработала.
+    //
+    // Смысл инкрементального режима в том, чтобы разложить сборку по кадрам:
+    // шаг здесь ограничен бюджетом (см. GC::setStepBudget), поэтому вместо
+    // одной заметной паузы в середине геймплея получается равномерная нагрузка.
+    // В stop-the-world режиме вызов ничего не делает — сборка идёт из allocate().
+    if (vm_.gc().incremental()) vm_.gc().step();
 }
 
 void ScriptWorld::dispatch(std::string_view method, std::span<const Value> args) {
@@ -751,6 +761,118 @@ void installEngineBindings(VM& vm, EngineContext& ctx) {
     vm.registerNative("frameIndex", 0, [c](VM&, std::span<const Value>) -> Value {
         return Value::integer(c->world ? static_cast<std::int64_t>(c->world->frame().frameIndex) : 0);
     }, Cap_Math);
+
+    // ------------------------------------------------------------ Сборщик мусора
+    // Управление GC требует Cap_Debug: мод не должен провоцировать паузы в
+    // чужой игре, а вот инструменты и сама игра — могут.
+
+    /// `gcCollect()` — полная сборка немедленно. Уместно на загрузочном экране
+    /// или после выгрузки уровня, когда пауза никому не мешает.
+    vm.registerNative("gcCollect", 0, [](VM& v, std::span<const Value>) -> Value {
+        v.requireCapability(Cap_Debug, "gcCollect()");
+        return Value::integer(static_cast<std::int64_t>(v.gc().collect()));
+    }, Cap_Debug);
+
+    /// `gcStep()` — одна порция работы; true, если цикл завершился.
+    vm.registerNative("gcStep", 0, [](VM& v, std::span<const Value>) -> Value {
+        v.requireCapability(Cap_Debug, "gcStep()");
+        return Value::boolean(v.gc().step());
+    }, Cap_Debug);
+
+    /// `gcSetIncremental(on)` — переключить режим сборки.
+    vm.registerNative("gcSetIncremental", 1, [](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Debug, "gcSetIncremental()");
+        v.gc().setIncremental(a[0].truthy());
+        return Value::nil();
+    }, Cap_Debug);
+
+    /// `gcSetStepBudget(bytes)` — бюджет одного шага.
+    vm.registerNative("gcSetStepBudget", 1, [](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Debug, "gcSetStepBudget()");
+        const std::int64_t bytes = a[0].asInt();
+        v.gc().setStepBudget(bytes > 0 ? static_cast<std::size_t>(bytes) : 1);
+        return Value::nil();
+    }, Cap_Debug);
+
+    /// `gcStats()` — карта со статистикой для HUD и отладочных оверлеев.
+    vm.registerNative("gcStats", 0, [](VM& v, std::span<const Value>) -> Value {
+        const GC::Stats s = v.gc().stats();
+        Value m = v.makeMap();
+        auto* map = static_cast<ObjMap*>(m.asObject());
+        map->set(v.gc(), v.internString("objects"),     Value::integer(static_cast<std::int64_t>(s.objects)));
+        map->set(v.gc(), v.internString("bytes"),       Value::integer(static_cast<std::int64_t>(s.bytes)));
+        map->set(v.gc(), v.internString("collections"), Value::integer(static_cast<std::int64_t>(s.collections)));
+        map->set(v.gc(), v.internString("freed"),       Value::integer(static_cast<std::int64_t>(s.totalFreed)));
+        map->set(v.gc(), v.internString("steps"),       Value::integer(static_cast<std::int64_t>(s.steps)));
+        map->set(v.gc(), v.internString("lastPauseMs"), Value::fromNumber(s.lastPauseMs));
+        map->set(v.gc(), v.internString("maxPauseMs"),  Value::fromNumber(s.maxPauseMs));
+        const char* phase = s.phase == GC::Phase::Mark  ? "mark"
+                          : s.phase == GC::Phase::Sweep ? "sweep" : "idle";
+        map->set(v.gc(), v.internString("phase"), v.internString(phase));
+        return m;
+    }, Cap_Debug);
+
+    // ------------------------------------------------------------------ Сцены
+    // Сохранение/загрузка требуют Cap_IO, а не Cap_Scene: это запись на диск
+    // произвольным путём. У профиля Cap_ModSandbox такого права нет, поэтому
+    // мод не может ни перезаписать сейв игрока, ни подменить уровень.
+
+    /// `saveScene(path) -> Bool` — сохранить текущий мир в .lvscene.
+    vm.registerNative("saveScene", 1, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_IO, "saveScene()");
+        if (!c->world) { v.runtimeErrorPublic("saveScene(): no world attached"); return Value::boolean(false); }
+        std::string err;
+        const bool ok = scene::saveSceneToFile(*c->world, a[0].toString(), {}, &err);
+        if (!ok) v.logLine("saveScene() failed: " + err);
+        return Value::boolean(ok);
+    }, Cap_IO);
+
+    /// `loadScene(path) -> Map{ok, entities, warnings, error}`.
+    /// Сцена догружается ПОВЕРХ текущей; чтобы заменить — сначала clearScene().
+    vm.registerNative("loadScene", 1, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_IO, "loadScene()");
+        Value m = v.makeMap();
+        auto* map = static_cast<ObjMap*>(m.asObject());
+        if (!c->world) {
+            map->set(v.gc(), v.internString("ok"), Value::boolean(false));
+            map->set(v.gc(), v.internString("error"), v.internString("no world attached"));
+            return m;
+        }
+        const scene::SceneLoadResult r = scene::loadSceneFromFile(*c->world, a[0].toString());
+        map->set(v.gc(), v.internString("ok"), Value::boolean(r.ok));
+        map->set(v.gc(), v.internString("entities"),
+                 Value::integer(static_cast<std::int64_t>(r.entities.size())));
+        map->set(v.gc(), v.internString("error"), v.internString(r.error));
+        // Предупреждения отдаём числом и пишем в лог: скрипту почти всегда
+        // нужен лишь факт «сцена загрузилась не идеально», а подробности
+        // читает разработчик в консоли.
+        map->set(v.gc(), v.internString("warnings"),
+                 Value::integer(static_cast<std::int64_t>(r.warnings.size())));
+        for (const std::string& w : r.warnings) v.logLine("loadScene: " + w);
+        if (!r.ok) v.logLine("loadScene() failed: " + r.error);
+        return m;
+    }, Cap_IO);
+
+    /// `clearScene()` — уничтожить все сущности (системы остаются).
+    vm.registerNative("clearScene", 0, [c](VM& v, std::span<const Value>) -> Value {
+        v.requireCapability(Cap_Spawn, "clearScene()");
+        if (c->world) c->world->registry().clear();
+        return Value::nil();
+    }, Cap_Spawn);
+
+    /// `setName(entity, name)` / `getName(entity) -> String`.
+    vm.registerNative("setName", 2, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Scene, "setName()");
+        if (!c->world) return Value::nil();
+        scene::setEntityName(c->world->registry(), argEntity(a[0]), a[1].toString());
+        return Value::nil();
+    }, Cap_Scene);
+
+    vm.registerNative("getName", 1, [c](VM& v, std::span<const Value> a) -> Value {
+        v.requireCapability(Cap_Scene, "getName()");
+        if (!c->world) return v.internString("");
+        return v.internString(scene::entityName(c->world->registry(), argEntity(a[0])));
+    }, Cap_Scene);
 }
 
 } // namespace lv::scripting

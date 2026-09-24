@@ -11,13 +11,15 @@ limvine/
 │   │   ├── Component.h         #   концепт Component, TypeId, ComponentMetaRegistry
 │   │   ├── Registry.h/.cpp     #   архетипный реестр: SoA-пулы, swap-remove, поколения
 │   │   ├── CommandBuffer.h     #   отложенные структурные изменения
+│   │   ├── Hierarchy.h/.cpp    #   Parent/Children/WorldTransform, setParent, BFS world-матриц
 │   │   └── World.h/.cpp        #   фазы кадра и планировщик систем
 │   ├── lvscript/               # LV Script — отдельная библиотека (не знает о движке)
 │   │   ├── Common.h            #   lv::format, lv::Expected (замена std::expected)
 │   │   ├── Lexer.h/.cpp        #   токены, интерполяция строк, мягкие ключевые слова
 │   │   ├── Parser.h/.cpp       #   AST; блоки do..end, if-выражения, лямбды, match
 │   │   ├── AST.h/.cpp          #   узлы выражений/операторов, Param, MethodDecl, FieldDecl
-│   │   ├── Bytecode.h          #   Op, ObjFunction, Disassembler, контейнер .lvc
+│   │   ├── Bytecode.h/.cpp     #   Op, Disassembler, (де)сериализация .lvc, таблица имён
+│   │   ├── BytecodeCache.h/.cpp#   дисковый кэш .lvc: проверка версии и хэша, атомарная запись
 │   │   ├── Compiler.h/.cpp     #   AST → байткод; moduleGlobals_, области видимости
 │   │   ├── Value.h/.cpp        #   NaN-boxing Value, Obj* (String/Array/Map/Closure/…)
 │   │   ├── GC.h/.cpp           #   mark-and-sweep, pin, бюджет памяти
@@ -31,9 +33,14 @@ limvine/
 │   │   ├── GraphicsAPI.h/.cpp  #   интерфейс + NullGraphicsAPI (LV_WITH_VULKAN / _OPENGL)
 │   │   └── Renderer.h/.cpp     #   пайплайн кадра, камера, отладочные линии
 │   ├── physics/
-│   │   └── Physics.h/.cpp      #   обёртка Jolt (LV_WITH_JOLT) + встроенный
-│   │                             #   детерминированный симулятор (AABB, raycast,
-│   │                             #   overlapSphere, фикс. шаг, матрица коллизий 16×16)
+│   │   ├── Physics.h/.cpp      #   PhysicsWorld: ECS-синхронизация, фиксированный
+│   │   │                         #   шаг, матрица коллизий 16×16. Без #ifdef —
+│   │   │                         #   симуляция делегируется бэкенду
+│   │   └── backends/
+│   │       ├── PhysicsBackend.h    # интерфейс IPhysicsBackend + фабрика
+│   │       ├── PhysicsBackend.cpp  # единственное место выбора реализации
+│   │       ├── BuiltinBackend.h/.cpp # детерминированный AABB-солвер без зависимостей
+│   │       └── JoltBackend.h/.cpp    # настоящий Jolt Physics 5.x (LV_WITH_JOLT)
 │   ├── input/
 │   │   └── Input.h/.cpp        #   Input Mapping Contexts: стек контекстов с
 │   │                             #   приоритетами, клавиши/мышь/геймпад как оси,
@@ -45,6 +52,10 @@ limvine/
 │   ├── asset/
 │   │   └── AssetManager.h/.cpp #   конвейер ассетов, кэш (путь, mtime, хэш),
 │   │                             #   FileWatcher (polling), каскад по зависимостям
+│   ├── scene/
+│   │   └── Scene.h/.cpp        #   формат .lvscene: сохранение/загрузка мира
+│   │                             #   через рефлексию BindingRegistry, плотные
+│   │                             #   id вместо handle'ов, компонент Name
 │   ├── scripting/
 │   │   ├── EngineBindings.h/.cpp  # ScriptWorld, BindingRegistry, биндинги
 │   │   │                          # (spawn/setPosition/raycast/inputAxis/…), hotReload
@@ -66,7 +77,11 @@ limvine/
 │   ├── pathfinding.lvs         #   BinaryHeap + GridNav (A*, октидная эвристика)
 │   ├── inventory.lvs           #   ItemDef/ItemDatabase/Slot/Inventory
 │   ├── dialogue.lvs            #   граф диалогов (choices/actions/next, флаги, require)
-│   └── quest.lvs               #   Objective/Quest/QuestLog, цепочки nextQuest, journal()
+│   ├── quest.lvs               #   Objective/Quest/QuestLog, цепочки nextQuest, journal()
+│   ├── character.lvs           #   CharacterController: движение, камера,
+│   │                             #   гравитация, прыжок, границы мира
+│   └── interaction.lvs         #   InteractionSystem: дистанция + угол обзора +
+│                                 #   условие + видимость, приоритеты, hold
 │
 ├── templates/                  # игровые шаблоны (манифест + скрипты + ассеты)
 │   ├── farming_iso/            #   изометрическая ферма
@@ -85,6 +100,9 @@ limvine/
 ├── tests/                      # self-test'ы (без внешнего тестового фреймворка)
 │   ├── lvscript_tests.cpp      #   язык — 53 проверки
 │   ├── ecs_tests.cpp           #   13
+│   ├── hierarchy_tests.cpp     #   иерархия + матричные хелперы — 44
+│   ├── bytecode_tests.cpp      #   .lvc round-trip и дисковый кэш — 74
+│   ├── gc_tests.cpp            #   сборщик мусора, инкрементальный режим — 60
 │   ├── render_tests.cpp        #   15
 │   ├── input_tests.cpp         #   17
 │   ├── job_tests.cpp           #   6
@@ -92,7 +110,9 @@ limvine/
 │   ├── stdlib_tests.cpp        #   stdlib/*.lvs — 26
 │   ├── engine_integration_tests.cpp # скрипт ↔ движок — 27
 │   ├── editor_tests.cpp        #   панели редактора — 36
-│   └── template_tests.cpp      #   три шаблона — 71
+│   ├── template_tests.cpp      #   три шаблона — 71
+│   ├── scene_tests.cpp         #   .lvscene: round-trip, ссылки, битые файлы — 104
+│   └── gameplay_tests.cpp      #   character/interaction на живом движке — 70
 │
 ├── docs/
 │   ├── 01_architecture.md      #   слои, ECS, конвейер LV Script, рендер, физика, jobs
@@ -100,7 +120,7 @@ limvine/
 │   ├── 03_lvscript_spec.md     #   спецификация языка + биндинги движка
 │   └── 04_engine_systems.md    #   API подсистем и рецепты
 │
-├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 10 тестов
+├── CMakeLists.txt              # библиотека limvine, lvrun, limvine-editor, 15 тестов
 ├── build_tests.sh              # то же самое без cmake (g++ напрямую)
 └── README.md                   # быстрый старт, состав движка, обзор языка и шаблонов
 ```

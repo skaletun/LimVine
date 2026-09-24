@@ -509,6 +509,65 @@ exp log floor ceil round sign min max abs clamp lerp random randomInt deg rad`.
 | `inventory.lvs` | `ItemDef`, `ItemDatabase`, `Slot`, `Inventory` (стеки, вес, категории, `serialize`/`deserialize`) |
 | `dialogue.lvs` | `Dialogue`: граф узлов (`speaker/text/choices/actions/next`), флаги, условия `require`, история |
 | `quest.lvs` | `Objective`, `Quest`, `QuestLog`: цели-данные, `notify(kind, target, n)`, цепочки `nextQuest`, `journal()` |
+| `character.lvs` | `CharacterController`: движение (`camera`/`world`), гравитация и прыжок, границы мира, разворот по ходу, `eyePosition`/`lookDirection`/`lookAt` |
+| `interaction.lvs` | `InteractionSystem`: выбор цели по дистанции, углу обзора, условию и видимости; приоритеты, `once`, активация удержанием |
+
+> `character.lvs` и `interaction.lvs` требуют биндингов движка
+> (`spawn`/`getPosition`/`raycast`), поэтому работают только внутри
+> `ScriptWorld`, а не в «голой» VM. Остальные модули stdlib самодостаточны.
+
+#### CharacterController
+
+Контроллер намеренно **не читает ввод сам** — он принимает намерение движения.
+Благодаря этому один и тот же код водит игрока (ввод), NPC (результат A* из
+`pathfinding.lvs`) и воспроизведение реплея.
+
+```lua
+import "character"
+
+let cc = new CharacterController(player)
+cc.speed = 4.0
+cc.runSpeed = 7.0
+cc.mode = "camera"          # camera | world | none
+cc.gravity = 18.0           # 0 — выключить (изометрия, top-down)
+cc.bounds(-24.0, 24.0)      # ограничить перемещение ареной
+
+func update(dt) do
+    cc.lookDelta(mouseDelta())
+    cc.move(inputAxis("MoveX"), inputAxis("MoveY"))
+    cc.setRunning(inputHeld("Run"))
+    if inputPressed("Jump") do cc.jump() end
+    cc.update(dt)
+end
+```
+
+Вектор движения нормализуется, поэтому диагональ **не быстрее** прямой —
+ошибка, независимо повторённая во всех трёх шаблонах до выделения модуля.
+
+#### InteractionSystem
+
+```lua
+import "interaction"
+
+let world = new InteractionSystem()
+world.defaultRange = 2.5
+world.fieldOfView = 120.0          # 360 — реагировать во все стороны
+world.requireLineOfSight = true
+
+world.register(chest, { "label": "Открыть сундук", "action": || openChest() })
+world.register(door,  { "label": "Взломать", "hold": 1.5, "once": true,
+                        "enabled": || hasLockpick() })
+
+func update(dt) do
+    world.update(cc.position(), cc.forward(), dt)
+    if world.prompt != "" do hud.show(world.prompt) end
+    if inputHeld("Interact") do world.hold(dt) else world.releaseHold() end
+end
+```
+
+Кандидат отбирается четырьмя фильтрами в порядке возрастания цены: дистанция →
+угол обзора → условие `enabled` → видимость. Raycast выполняется **только для
+победителя**, а не для каждого объекта сцены.
 
 ---
 
@@ -589,7 +648,40 @@ stopSound(voice)
 let dt = deltaTime();  let t = time();  let f = frameIndex()
 ```
 
-### 10.5 Глобальные обработчики кадра
+### 10.5 Сцены и сохранения
+
+```lua
+let e = spawn()
+setName(e, "Chest")                       # имя хранится в ECS-компоненте Name
+print(getName(e))                         # "Chest"
+
+saveScene("saves/slot1.lvscene")          # атомарная запись (tmp + rename)
+
+clearScene()                              # уничтожить все сущности
+let r = loadScene("saves/slot1.lvscene")
+if r.ok do
+    print("сущностей: {r.entities}, предупреждений: {r.warnings}")
+else
+    print("ошибка: {r.error}")
+end
+```
+
+| Функция | Право | Описание |
+|---|---|---|
+| `saveScene(path) -> Bool` | `Cap_IO` | сохранить мир в `.lvscene` |
+| `loadScene(path) -> Map` | `Cap_IO` | догрузить сцену **поверх** текущей; поля `ok`, `entities`, `warnings`, `error` |
+| `clearScene()` | `Cap_Spawn` | уничтожить все сущности (системы остаются) |
+| `setName(e, s)` / `getName(e)` | `Cap_Scene` | имя сущности |
+
+> `saveScene`/`loadScene` требуют **`Cap_IO`**, а не `Cap_Scene`: это запись на
+> диск по произвольному пути. В профиле `Cap_ModSandbox` такого права нет,
+> поэтому мод не может ни перезаписать сейв игрока, ни подменить уровень.
+
+Неизвестные компоненты и поля при загрузке не роняют сцену — они попадают в
+счётчик `warnings` и в лог консоли. Это позволяет старому билду открывать
+сцены, сохранённые более новой версией движка.
+
+### 10.6 Глобальные обработчики кадра
 
 `ScriptWorld::tick(dt)` тикает планировщик и вызывает (если они определены)
 глобальные функции `update(dt)` и `fixedUpdate(dt)`. Соглашение перечислено в

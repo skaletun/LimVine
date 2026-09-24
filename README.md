@@ -5,10 +5,22 @@ system**, собственный скриптовый язык **LV Script** (к
 стековая VM, GC, корутины, песочница), **Visual Scripting** поверх него и три
 готовых игровых шаблона.
 
-Всё дерево собирается и проходит **294 проверки в 10 self-test'ах без единой
-внешней зависимости** (headless, Null-бэкенды рендера/звука/физики, редактор
-без ImGui). Vulkan, OpenGL, Jolt, OpenAL и ImGui подключаются опциями
-`LV_WITH_*`.
+Всё дерево собирается и проходит **707 проверок в 16 self-test'ах без единой
+внешней зависимости** (headless, Null-бэкенды рендера/звука, редактор без
+ImGui). Vulkan, OpenGL, Jolt, OpenAL и ImGui подключаются опциями `LV_WITH_*`.
+
+Физика — не заглушка: **Jolt Physics 5.x подключён по-настоящему**, а выбор
+движка сделан через интерфейс `IPhysicsBackend`. Оба бэкенда (встроенный
+детерминированный симулятор и Jolt) проходят **один и тот же контрактный
+набор** `physics_tests`, поэтому расхождение в их поведении ловится в CI:
+с включённым Jolt тестов становится 767.
+
+```bash
+# Сборка с настоящим Jolt (исходники подпроектом)
+cmake -B build -DLV_WITH_JOLT=ON -DLV_JOLT_SOURCE_DIR=/путь/к/JoltPhysics
+# ...или с установленным пакетом
+cmake -B build -DLV_WITH_JOLT=ON -DJolt_DIR=/путь/к/lib/cmake/Jolt
+```
 
 ```
 LV Script self-test:        53 passed     Editor self-test:       36 passed
@@ -16,6 +28,9 @@ ECS self-test:              13 passed     Template self-test:     71 passed
 Render self-test:           15 passed     LV Script stdlib:       26 passed
 Input self-test:            17 passed     Engine integration:     27 passed
 JobSystem self-test:         6 passed     Visual Scripting:       31 passed
+Hierarchy self-test:        44 passed     Bytecode self-test:     74 passed
+GC self-test:               60 passed     Scene self-test:       104 passed
+Gameplay self-test:         70 passed
 ```
 
 ---
@@ -25,7 +40,7 @@ JobSystem self-test:         6 passed     Visual Scripting:       31 passed
 ### Без CMake (только g++ и bash)
 
 ```bash
-bash build_tests.sh          # собрать и прогнать все 9 сьютов
+bash build_tests.sh          # собрать и прогнать все 16 сьютов
 ```
 
 ### CMake

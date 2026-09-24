@@ -786,15 +786,6 @@ void Compiler::compileClass(const StmtPtr& s) {
 // ---------------------------------------------------------------------------
 void Compiler::compilePattern(const Pattern& p, std::size_t subjectSlot,
                               std::vector<std::size_t>& failJumps, std::vector<std::string>& bindings) {
-    auto failOnType = [&](const char* typeName, SourceLoc loc) {
-        emit(Op::Constant, addConstant(vm_.internString(std::string_view(typeName))), loc);
-        pushStack();
-        emit(Op::IsInstance, 0, loc);
-        popStack(2); pushStack();
-        failJumps.push_back(emitJump(Op::JumpIfFalse, loc));
-        popStack();
-    };
-
     switch (p.kind) {
         case Pattern::Kind::Wildcard:
             emit(Op::Pop, 0, p.loc);

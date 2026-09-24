@@ -88,7 +88,11 @@ target_link_libraries(limvine PUBLIC Threads::Threads)
 # настоящие реализации, иначе остаются Null-бэкенды.
 # Макрос LV_WITH_<OPT> выставляется ТОЛЬКО если зависимость реально найдена:
 # иначе код начинал бы включать отсутствующие заголовки (<imgui.h>, <vulkan/…>).
-foreach(opt VULKAN OPENGL JOLT OPENAL)
+# JOLT сознательно не в этом списке: его макрос выставляется ниже и ТОЛЬКО
+# после того, как библиотека действительно найдена. Иначе JoltBackend.cpp
+# начинал бы включать <Jolt/Jolt.h>, которого нет, и сборка падала бы вместо
+# аккуратного отката на встроенный симулятор.
+foreach(opt VULKAN OPENGL OPENAL)
     if(LV_WITH_${opt})
         target_compile_definitions(limvine PUBLIC LV_WITH_${opt}=1)
     endif()
@@ -107,14 +111,39 @@ if(LV_WITH_OPENAL)
     target_link_libraries(limvine PUBLIC ${OPENAL_LIBRARY})
     target_include_directories(limvine PUBLIC ${OPENAL_INCLUDE_DIR})
 endif()
+# --- Jolt Physics ----------------------------------------------------------
+# Два способа подключения:
+#   1) установленный пакет:  cmake -B build -DLV_WITH_JOLT=ON -DJolt_DIR=/путь/к/JoltConfig.cmake
+#   2) исходники подпроектом: cmake -B build -DLV_WITH_JOLT=ON -DLV_JOLT_SOURCE_DIR=/путь/к/JoltPhysics
+#
+# Вариант с целью Jolt::Jolt предпочтителен: Jolt проверяет В РАНТАЙМЕ, что
+# клиентский код собран с тем же набором макросов (JPH_CROSS_PLATFORM_DETERMINISTIC,
+# JPH_PROFILE_ENABLED, JPH_DEBUG_RENDERER, JPH_OBJECT_STREAM и набор SIMD).
+# При несовпадении процесс аварийно завершается с «Mismatching define ...»,
+# потому что раскладка структур различается. Импортированная цель приносит эти
+# макросы через INTERFACE_COMPILE_DEFINITIONS, и рассинхронизация невозможна.
+set(LV_JOLT_SOURCE_DIR "" CACHE PATH "Каталог исходников JoltPhysics (сборка подпроектом)")
 if(LV_WITH_JOLT)
-    # Jolt подключается как подпроект или find_package — см. docs/01_architecture.md
-    find_package(Jolt CONFIG QUIET)
-    if(Jolt_FOUND)
-        target_link_libraries(limvine PUBLIC Jolt::Jolt)
+    set(LV_JOLT_OK FALSE)
+    if(LV_JOLT_SOURCE_DIR AND EXISTS "${LV_JOLT_SOURCE_DIR}/Build/CMakeLists.txt")
+        add_subdirectory("${LV_JOLT_SOURCE_DIR}/Build" ${CMAKE_BINARY_DIR}/_jolt EXCLUDE_FROM_ALL)
+        target_link_libraries(limvine PUBLIC Jolt)
+        set(LV_JOLT_OK TRUE)
     else()
-        message(WARNING "LV_WITH_JOLT=ON, но Jolt не найден: остаётся встроенный симулятор")
-        target_compile_definitions(limvine PRIVATE LV_WITH_JOLT=0)
+        find_package(Jolt CONFIG QUIET)
+        if(Jolt_FOUND)
+            target_link_libraries(limvine PUBLIC Jolt::Jolt)
+            set(LV_JOLT_OK TRUE)
+        endif()
+    endif()
+
+    if(LV_JOLT_OK)
+        target_compile_definitions(limvine PUBLIC LV_WITH_JOLT=1)
+        message(STATUS "LimVine: физический бэкенд Jolt включён")
+    else()
+        message(WARNING
+            "LV_WITH_JOLT=ON, но Jolt не найден — остаётся встроенный симулятор. "
+            "Укажите -DJolt_DIR=... или -DLV_JOLT_SOURCE_DIR=...")
     endif()
 endif()
 if(LV_WITH_IMGUI)
@@ -183,7 +212,16 @@ if(LV_BUILD_TESTS)
     set(LV_HEAVY_SUITES
         engine_integration_tests
         template_tests
-        editor_tests)
+        editor_tests
+        # Сериализация сцен: использует рефлексию BindingRegistry, поэтому
+        # тянет рендер, физику и звук ради их компонентов.
+        scene_tests
+        # Геймплейные модули stdlib (character/interaction): им нужны живые
+        # биндинги движка — spawn/getPosition/raycast.
+        gameplay_tests
+        # Контракт физики: один и тот же набор проверок прогоняется на каждом
+        # доступном бэкенде (встроенный + Jolt, если он включён).
+        physics_tests)
 
     # Сьюты, которым хватает части исходников (быстрее собираются и линкуются).
     add_executable(lvscript_tests     tests/lvscript_tests.cpp ${LV_LVSCRIPT_SOURCES})
@@ -197,9 +235,19 @@ if(LV_BUILD_TESTS)
                                        engine/scripting/visual/JsonMini.cpp
                                        ${LV_LVSCRIPT_SOURCES})
     add_executable(stdlib_tests       tests/stdlib_tests.cpp ${LV_LVSCRIPT_SOURCES})
+    # Сериализация байткода и дисковый кэш .lvc.
+    add_executable(bytecode_tests     tests/bytecode_tests.cpp ${LV_LVSCRIPT_SOURCES})
+    # Сборщик мусора: корректность, трёхцветная инварианта, инкрементальный режим.
+    add_executable(gc_tests           tests/gc_tests.cpp ${LV_LVSCRIPT_SOURCES})
+    # Иерархия сущностей: Parent/Children/WorldTransform + матричные хелперы.
+    add_executable(hierarchy_tests    tests/hierarchy_tests.cpp
+                                       engine/ecs/Registry.cpp
+                                       engine/ecs/Hierarchy.cpp
+                                       engine/ecs/World.cpp
+                                       engine/core/JobSystem.cpp)
 
     foreach(suite lvscript_tests ecs_tests render_tests input_tests job_tests
-                  visualscript_tests stdlib_tests)
+                  visualscript_tests stdlib_tests bytecode_tests gc_tests hierarchy_tests)
         target_include_directories(${suite} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/engine)
         target_link_libraries(${suite} PRIVATE Threads::Threads)
         add_test(NAME ${suite} COMMAND ${suite}

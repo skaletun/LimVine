@@ -262,6 +262,103 @@ struct alignas(16) Mat4 {
 [[nodiscard]] Mat4 operator*(const Mat4& a, const Mat4& b) noexcept;
 [[nodiscard]] Vec4 operator*(const Mat4& m, const Vec4& v) noexcept;
 
+/**
+ * @brief Матрица 3x3 в column-major порядке: элемент (строка r, столбец c) лежит
+ *        в @c m[c * 3 + r] — та же раскладка, что у Mat4.
+ */
+struct alignas(16) Mat3x3 {
+    Real m[9] = {1,0,0,0,1,0,0,0,1};
+    /// Доступ по (строка, столбец) — избавляет вызывающий код от арифметики индексов.
+    [[nodiscard]] constexpr Real at(int row, int col) const noexcept { return m[col * 3 + row]; }
+    constexpr void set(int row, int col, Real v) noexcept { m[col * 3 + row] = v; }
+};
+
+/**
+ * @brief Кватернион из 3x3 матрицы вращения (метод Shepperd: ветвление по
+ *        наибольшему диагональному элементу — численно устойчиво во всех случаях).
+ *
+ * @param m Ортонормированная матрица вращения (масштаб должен быть снят заранее).
+ */
+[[nodiscard]] inline Quat quatFromMat3(const Mat3x3& m) noexcept {
+    const Real r00 = m.at(0,0), r01 = m.at(0,1), r02 = m.at(0,2);
+    const Real r10 = m.at(1,0), r11 = m.at(1,1), r12 = m.at(1,2);
+    const Real r20 = m.at(2,0), r21 = m.at(2,1), r22 = m.at(2,2);
+    const Real trace = r00 + r11 + r22;
+    Quat q;
+    if (trace > 0.0f) {
+        const Real s = std::sqrt(trace + 1.0f) * 2.0f;   // s = 4w
+        q = {(r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25f * s};
+    } else if (r00 > r11 && r00 > r22) {
+        const Real s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;   // s = 4x
+        q = {0.25f * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s};
+    } else if (r11 > r22) {
+        const Real s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;   // s = 4y
+        q = {(r01 + r10) / s, 0.25f * s, (r12 + r21) / s, (r02 - r20) / s};
+    } else {
+        const Real s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;   // s = 4z
+        q = {(r02 + r20) / s, (r12 + r21) / s, 0.25f * s, (r10 - r01) / s};
+    }
+    return normalize(q);
+}
+
+/// Обратная матрица (для вычисления локальных координат из world-).
+[[nodiscard]] inline Mat4 inverse(const Mat4& m) noexcept {
+    const Real* o = m.m;
+    Real inv[16];
+    inv[0]  =  o[5]*o[10]*o[15] - o[5]*o[11]*o[14] - o[9]*o[6]*o[15] + o[9]*o[7]*o[14] + o[13]*o[6]*o[11] - o[13]*o[7]*o[10];
+    inv[4]  = -o[4]*o[10]*o[15] + o[4]*o[11]*o[14] + o[8]*o[6]*o[15] - o[8]*o[7]*o[14] - o[12]*o[6]*o[11] + o[12]*o[7]*o[10];
+    inv[8]  =  o[4]*o[9]*o[15]  - o[4]*o[11]*o[13] - o[8]*o[5]*o[15] + o[8]*o[7]*o[13] + o[12]*o[5]*o[11] - o[12]*o[7]*o[9];
+    inv[12] = -o[4]*o[9]*o[14]  + o[4]*o[10]*o[13] + o[8]*o[5]*o[14] - o[8]*o[6]*o[13] - o[12]*o[5]*o[10] + o[12]*o[6]*o[9];
+    inv[1]  = -o[1]*o[10]*o[15] + o[1]*o[11]*o[14] + o[9]*o[2]*o[15] - o[9]*o[3]*o[14] - o[13]*o[2]*o[11] + o[13]*o[3]*o[10];
+    inv[5]  =  o[0]*o[10]*o[15] - o[0]*o[11]*o[14] - o[8]*o[2]*o[15] + o[8]*o[3]*o[14] + o[12]*o[2]*o[11] - o[12]*o[3]*o[10];
+    inv[9]  = -o[0]*o[9]*o[15]  + o[0]*o[11]*o[13] + o[8]*o[1]*o[15] - o[8]*o[3]*o[13] - o[12]*o[1]*o[11] + o[12]*o[3]*o[9];
+    inv[13] =  o[0]*o[9]*o[14]  - o[0]*o[10]*o[13] - o[8]*o[1]*o[14] + o[8]*o[2]*o[13] + o[12]*o[1]*o[10] - o[12]*o[2]*o[9];
+    inv[2]  =  o[1]*o[6]*o[15]  - o[1]*o[7]*o[14]  - o[5]*o[2]*o[15] + o[5]*o[3]*o[14] + o[13]*o[2]*o[7]  - o[13]*o[3]*o[6];
+    inv[6]  = -o[0]*o[6]*o[15]  + o[0]*o[7]*o[14]  + o[4]*o[2]*o[15] - o[4]*o[3]*o[14] - o[12]*o[2]*o[7]  + o[12]*o[3]*o[6];
+    inv[10] =  o[0]*o[5]*o[15]  - o[0]*o[7]*o[13]  - o[4]*o[1]*o[15] + o[4]*o[3]*o[13] + o[12]*o[1]*o[7]  - o[12]*o[3]*o[5];
+    inv[14] = -o[0]*o[5]*o[14]  + o[0]*o[6]*o[13]  + o[4]*o[1]*o[14] - o[4]*o[2]*o[13] - o[12]*o[1]*o[6]  + o[12]*o[2]*o[5];
+    inv[3]  = -o[1]*o[6]*o[11]  + o[1]*o[7]*o[10]  + o[5]*o[2]*o[11] - o[5]*o[3]*o[10] - o[9]*o[2]*o[7]   + o[9]*o[3]*o[6];
+    inv[7]  =  o[0]*o[6]*o[11]  - o[0]*o[7]*o[10]  - o[4]*o[2]*o[11] + o[4]*o[3]*o[10] + o[8]*o[2]*o[7]   - o[8]*o[3]*o[6];
+    inv[11] = -o[0]*o[5]*o[11]  + o[0]*o[7]*o[9]   + o[4]*o[1]*o[11] - o[4]*o[3]*o[9]  - o[8]*o[1]*o[7]   + o[8]*o[3]*o[5];
+    inv[15] =  o[0]*o[5]*o[10]  - o[0]*o[6]*o[9]   - o[4]*o[1]*o[10] + o[4]*o[2]*o[9]  + o[8]*o[1]*o[6]   - o[8]*o[2]*o[5];
+    Real det = o[0]*inv[0] + o[1]*inv[4] + o[2]*inv[8] + o[3]*inv[12];
+    if (std::fabs(det) < kEpsilon) return Mat4::identity();
+    det = 1.0f / det;
+    Mat4 r;
+    for (int i = 0; i < 16; ++i) r.m[i] = inv[i] * det;
+    return r;
+}
+
+/// Извлечение смещения из column-major матрицы TRS.
+[[nodiscard]] inline Vec3 extractTranslation(const Mat4& m) noexcept { return {m.m[12], m.m[13], m.m[14]}; }
+
+/// Извлечение масштаба (предполагается равномерный или ортогональный базис).
+[[nodiscard]] inline Vec3 extractScale(const Mat4& m) noexcept {
+    auto col = [&](int c) { return Vec3{m.m[c*4], m.m[c*4+1], m.m[c*4+2]}; };
+    return {length(col(0)), length(col(1)), length(col(2))};
+}
+
+/**
+ * @brief Извлечение вращения из TRS-матрицы.
+ *
+ * Каждый столбец базиса делится на СВОЙ масштаб (столбец c соответствует
+ * масштабу по оси c — именно так его закладывает @c Mat4::trs), после чего
+ * ортонормированный базис переводится в кватернион.
+ */
+[[nodiscard]] inline Quat extractRotation(const Mat4& m) noexcept {
+    Vec3 s = extractScale(m);
+    const Real inv[3] = {
+        s.x > kEpsilon ? 1.0f / s.x : 1.0f,
+        s.y > kEpsilon ? 1.0f / s.y : 1.0f,
+        s.z > kEpsilon ? 1.0f / s.z : 1.0f
+    };
+    Mat3x3 m3;
+    for (int c = 0; c < 3; ++c)
+        for (int r = 0; r < 3; ++r)
+            m3.m[c * 3 + r] = m.m[c * 4 + r] * inv[c];
+    return quatFromMat3(m3);
+}
+
 inline Mat4 Mat4::rotation(const Quat& q) noexcept {
     const Real xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
     const Real xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;

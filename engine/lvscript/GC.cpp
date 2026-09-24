@@ -1,11 +1,12 @@
 /**
  * @file    GC.cpp
- * @brief   Реализация mark-and-sweep сборщика.
+ * @brief   Реализация инкрементального трёхцветного mark-and-sweep сборщика.
  */
 #include "GC.h"
 
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 
 namespace lv {
 
@@ -173,81 +174,232 @@ void GC::traceObject(ObjHeader* obj) {
     }
 }
 
-void GC::markPhase() {
-    if (roots_) roots_->markRoots(*this);
-    while (!grayStack_.empty()) {
-        ObjHeader* obj = grayStack_.back();
-        grayStack_.pop_back();
-        traceObject(obj);
+// ---------------------------------------------------------------------------
+//  Освобождение одного объекта
+// ---------------------------------------------------------------------------
+namespace {
+
+/// Вызвать деструктор и освободить внутренние буферы объекта.
+void destroyObject(ObjHeader* obj) {
+    switch (obj->type) {
+        case ObjHeader::Type::Array:
+            std::free(static_cast<ObjArray*>(obj)->items);
+            break;
+        case ObjHeader::Type::Map:
+            std::free(static_cast<ObjMap*>(obj)->entries);
+            break;
+        case ObjHeader::Type::Function:
+            static_cast<ObjFunction*>(obj)->~ObjFunction();
+            break;
+        case ObjHeader::Type::Coroutine:
+            static_cast<ObjCoroutine*>(obj)->~ObjCoroutine();
+            break;
+        case ObjHeader::Type::Class:
+            static_cast<ObjClass*>(obj)->~ObjClass();
+            break;
+        case ObjHeader::Type::NativeFn:
+            static_cast<ObjNativeFn*>(obj)->~ObjNativeFn();
+            break;
+        case ObjHeader::Type::Iterator:
+            static_cast<ObjIterator*>(obj)->~ObjIterator();
+            break;
+        default: break;
+    }
+    ::operator delete(obj);
+}
+
+} // namespace
+
+std::size_t GC::workOf(const ObjHeader* obj) noexcept {
+    // Стоимость обхода пропорциональна числу просматриваемых ссылок.
+    // Точность здесь не нужна — важно, чтобы крупные контейнеры «стоили»
+    // дороже, иначе один массив на миллион элементов съедал бы весь кадр.
+    switch (obj->type) {
+        case ObjHeader::Type::Array:
+            return 32 + static_cast<const ObjArray*>(obj)->count * sizeof(Value);
+        case ObjHeader::Type::Map:
+            return 32 + static_cast<const ObjMap*>(obj)->capacity * sizeof(MapEntry);
+        case ObjHeader::Type::Function: {
+            const auto* f = static_cast<const ObjFunction*>(obj);
+            return 32 + f->constants.size() * sizeof(Value) + f->nested.size() * sizeof(void*);
+        }
+        case ObjHeader::Type::Coroutine: {
+            const auto* co = static_cast<const ObjCoroutine*>(obj);
+            std::size_t w = 64 + co->stack.size() * sizeof(Value);
+            if (co->ownerContext) w += co->ownerContext->top * sizeof(Value);
+            return w;
+        }
+        default:
+            return 32;
     }
 }
 
-std::size_t GC::sweepPhase() {
-    std::size_t freed = 0;
-    ObjHeader** pp = &objects_;
-    while (*pp) {
-        ObjHeader* obj = *pp;
-        if (obj->marked) {
-            obj->marked = false;
-            pp = &obj->next;
-        } else if (obj->pinned) {
-            obj->marked = false;
-            pp = &obj->next;
+void GC::notePause(double ms) noexcept {
+    lastPauseMs_ = ms;
+    if (ms > maxPauseMs_) maxPauseMs_ = ms;
+}
+
+void GC::setIncremental(bool on) noexcept {
+    if (incremental_ == on) return;
+    // Переключение посреди цикла оставило бы половину графа серой, поэтому
+    // текущий цикл сначала доводится до конца.
+    if (phase_ != Phase::Idle) collect();
+    incremental_ = on;
+}
+
+void GC::markRootsIntoGray() {
+    grayStack_.clear();
+    if (roots_) roots_->markRoots(*this);
+
+    // Закреплённые объекты — это ТОЖЕ корни.
+    //
+    // pin() гарантирует, что сам объект переживёт sweep, но не говорит ничего
+    // о том, на что он ссылается. Модуль stdlib (`math`, `Array`, ...) —
+    // закреплённая ObjMap, чьи значения обычными объектами не являются
+    // корнями: без этого обхода нативные функции внутри модуля оказывались
+    // белыми и освобождались, а скрипт падал на «undefined name 'math'».
+    //
+    // Раньше это не всплывало, потому что sweep оставлял такие объекты в покое
+    // до первой же полной сборки — сейчас цикл честно завершается, и
+    // недостижимые дети закреплённых объектов действительно удаляются.
+    for (ObjHeader* obj = objects_; obj; obj = obj->next)
+        if (obj->pinned) markObject(obj);
+}
+
+bool GC::markStep(std::size_t budget) {
+    std::size_t spent = 0;
+    while (!grayStack_.empty()) {
+        ObjHeader* obj = grayStack_.back();
+        grayStack_.pop_back();
+        spent += workOf(obj);
+        traceObject(obj);
+        if (spent >= budget) return grayStack_.empty();
+    }
+    return true;
+}
+
+bool GC::sweepStep(std::size_t budget, std::size_t& freed) {
+    std::size_t spent = 0;
+    if (!sweepCursor_) sweepCursor_ = &objects_;
+
+    while (*sweepCursor_) {
+        ObjHeader* obj = *sweepCursor_;
+        spent += 16;
+        if (obj->marked || obj->pinned) {
+            obj->marked = false;                  // подготовка к следующему циклу
+            sweepCursor_ = &obj->next;
         } else {
-            *pp = obj->next;
+            *sweepCursor_ = obj->next;            // выкусываем из списка
             bytesAllocated_ -= obj->bytes;
-            switch (obj->type) {
-                case ObjHeader::Type::Array:
-                    std::free(static_cast<ObjArray*>(obj)->items);
-                    break;
-                case ObjHeader::Type::Map:
-                    std::free(static_cast<ObjMap*>(obj)->entries);
-                    break;
-                case ObjHeader::Type::Function:
-                    static_cast<ObjFunction*>(obj)->~ObjFunction();
-                    break;
-                case ObjHeader::Type::Coroutine:
-                    static_cast<ObjCoroutine*>(obj)->~ObjCoroutine();
-                    break;
-                case ObjHeader::Type::Class:
-                    static_cast<ObjClass*>(obj)->~ObjClass();
-                    break;
-                case ObjHeader::Type::NativeFn:
-                    static_cast<ObjNativeFn*>(obj)->~ObjNativeFn();
-                    break;
-                case ObjHeader::Type::Iterator:
-                    static_cast<ObjIterator*>(obj)->~ObjIterator();
-                    break;
-                default: break;
-            }
-            ::operator delete(obj);
+            destroyObject(obj);
             ++freed;
         }
+        if (spent >= budget) return *sweepCursor_ == nullptr;
     }
-    return freed;
+    return true;
+}
+
+void GC::finishCycle() {
+    phase_ = Phase::Idle;
+    sweepCursor_ = nullptr;
+    gcRequested_ = false;
+    ++collections_;
+    totalCollected_ += cycleFreed_;
+    objectCount_ -= cycleFreed_;
+    cycleFreed_ = 0;
+
+    nextThreshold_ = static_cast<std::size_t>(static_cast<double>(bytesAllocated_) * growthFactor_);
+    if (nextThreshold_ < bytesAllocated_ + 4096) nextThreshold_ = bytesAllocated_ + 4096;
+}
+
+bool GC::stepInternal(std::size_t budget) {
+    if (budget == 0) budget = stepBudget_;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    inCollection_ = true;
+    bool finished = false;
+
+    switch (phase_) {
+        case Phase::Idle:
+            // Новый цикл: корни красятся целиком (их немного и они должны быть
+            // согласованным снимком), дальше граф обходится порциями.
+            cycleFreed_ = 0;
+            markRootsIntoGray();
+            phase_ = Phase::Mark;
+            if (markStep(budget)) {
+                phase_ = Phase::Sweep;
+                sweepCursor_ = &objects_;
+            }
+            break;
+
+        case Phase::Mark:
+            if (markStep(budget)) {
+                phase_ = Phase::Sweep;
+                sweepCursor_ = &objects_;
+            }
+            break;
+
+        case Phase::Sweep:
+            if (sweepStep(budget, cycleFreed_)) {
+                finishCycle();
+                finished = true;
+            }
+            break;
+    }
+
+    inCollection_ = false;
+    ++steps_;
+    notePause(std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - t0).count());
+    return finished;
+}
+
+bool GC::step(std::size_t budget) {
+    // Вне цикла шаг начинает сборку только при достижении порога — иначе
+    // вызов раз в кадр крутил бы сборщик вхолостую.
+    if (phase_ == Phase::Idle && bytesAllocated_ < nextThreshold_ && !gcRequested_) return false;
+    return stepInternal(budget);
 }
 
 std::size_t GC::collect() {
     const auto t0 = std::chrono::steady_clock::now();
     inCollection_ = true;
-    markPhase();
-    const std::size_t freed = sweepPhase();
+
+    // Полный цикл. Если инкрементальная сборка была на середине, она
+    // доводится до конца в этом же вызове: фаза Mark продолжается с текущего
+    // grayStack (корни уже учтены), фаза Sweep — с текущего курсора.
+    if (phase_ == Phase::Idle) {
+        cycleFreed_ = 0;
+        markRootsIntoGray();
+        phase_ = Phase::Mark;
+    }
+    if (phase_ == Phase::Mark) {
+        while (!markStep(std::numeric_limits<std::size_t>::max())) {}
+        phase_ = Phase::Sweep;
+        sweepCursor_ = &objects_;
+    }
+    while (!sweepStep(std::numeric_limits<std::size_t>::max(), cycleFreed_)) {}
+
+    const std::size_t freed = cycleFreed_;
+    finishCycle();
+
     inCollection_ = false;
-    gcRequested_ = false;
-
-    ++collections_;
-    totalCollected_ += freed;
-    objectCount_ -= freed;
-    nextThreshold_ = static_cast<std::size_t>(static_cast<double>(bytesAllocated_) * growthFactor_);
-    if (nextThreshold_ < bytesAllocated_ + 4096) nextThreshold_ = bytesAllocated_ + 4096;
-
-    const auto t1 = std::chrono::steady_clock::now();
-    lastPauseMs_ = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    notePause(std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - t0).count());
     return freed;
 }
 
 GC::Stats GC::stats() const noexcept {
-    return Stats{objectCount_, bytesAllocated_, collections_, totalCollected_, lastPauseMs_};
+    Stats s;
+    s.objects     = objectCount_;
+    s.bytes       = bytesAllocated_;
+    s.collections = collections_;
+    s.totalFreed  = totalCollected_;
+    s.lastPauseMs = lastPauseMs_;
+    s.maxPauseMs  = maxPauseMs_;
+    s.steps       = steps_;
+    s.phase       = phase_;
+    return s;
 }
 
 } // namespace lv

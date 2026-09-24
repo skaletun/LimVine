@@ -12,6 +12,7 @@ dist/
 
 # Кэш скомпилированного байткода LV Script (.lvs -> .lvc)
 *.lvc
+.lvcache/
 
 # Редактор / IDE
 .vscode/

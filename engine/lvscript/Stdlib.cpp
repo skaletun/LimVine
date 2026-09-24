@@ -59,6 +59,14 @@ Value makeModule(VM& vm, std::string_view moduleName,
                  std::initializer_list<std::pair<std::string_view, Value>> members) {
     Value mod = vm.makeMap();
     auto* m = mod.as<ObjMap>();
+    // Модуль стандартной библиотеки живёт всю сессию, поэтому закрепляется.
+    //
+    // Без pin он оставался достижим только через таблицу модулей VM; в
+    // инкрементальном режиме сборка, начавшаяся между makeMap() и setModule(),
+    // успевала освободить ещё «ничей» объект, и скрипт падал с
+    // «undefined name 'math'». Закрепление снимает эту гонку и заодно избавляет
+    // GC от обхода неизменяемых таблиц stdlib на каждом цикле.
+    GC::pin(m);
     for (const auto& [k, v] : members) m->set(vm.gc(), vm.internString(k), v);
     vm.setModule(moduleName, mod);
     return mod;

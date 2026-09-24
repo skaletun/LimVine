@@ -3,6 +3,7 @@
  * @brief   Реализация игрового мира и планировщика систем.
  */
 #include "World.h"
+#include "Hierarchy.h"
 
 #include <algorithm>
 #include <chrono>
@@ -23,6 +24,15 @@ const char* phaseName(Phase p) noexcept {
 }
 
 World::World() : commands_(registry_) {
+    registerHierarchyComponents();
+    // Встроенная система иерархии: обновляет world-матрицы в начале PostPhysics,
+    // чтобы камера, рендер и звук видели актуальные world-позиции дочерних объектов.
+    SystemDesc hier;
+    hier.name = "Hierarchy.UpdateWorldTransforms";
+    hier.phase = Phase::PostPhysics;
+    hier.order = -1000;   // выполняется первой в PostPhysics
+    hier.update = [](World& w, float) { updateWorldTransforms(w.registry()); };
+    addSystem(std::move(hier));
     rebuildSchedule();
 }
 
@@ -109,10 +119,11 @@ void World::tick(float deltaTime) {
 
 void World::reset() {
     registry_.clear();
-    systems_.clear();
     timings_.clear();
     schedule_.clear();
     frame_ = FrameInfo{};
+    // Системы НЕ сбрасываем — встроенные вроде Hierarchy должны остаться.
+    // Вместо этого сбрасываем только компоненты сущностей.
     rebuildSchedule();
 }
 
