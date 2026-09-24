@@ -1,0 +1,46 @@
+name: CI
+
+# Проверка production-готовности на каждой ветке: Linux (gcc) и Windows
+# (MSVC) собираются с -DLV_WERROR=ON, все self-test'ы прогоняются ctest.
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DLV_WERROR=OFF
+      - name: Build
+        run: cmake --build build -j3
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure
+      # Отдельная сборка «как в релизе»: предупреждения = ошибки.
+      - name: Configure (Werror)
+        run: cmake -B build-we -DCMAKE_BUILD_TYPE=Release -DLV_WERROR=ON
+      - name: Smoke (lvcook check)
+        working-directory: build-we
+        run: |
+          cmake --build . --target lvcook -j3
+          ./lvcook check --quiet
+
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  bash-no-cmake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build_tests.sh (g++ only)
+        run: bash build_tests.sh

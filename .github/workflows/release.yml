@@ -1,0 +1,75 @@
+name: Release
+
+# Сборка установщиков по тегу v*.*.* :
+#   Windows — NSIS-мастер (.exe) с uninstall.exe, ярлыками и PATH;
+#   Linux   — .tar.gz и .deb.
+# Все артефакты прикладываются к GitHub Release вместе с SHA256SUMS.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+      - name: Configure (Release, x64)
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Tests (инсталлятор собирается только из зелёной сборки)
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package (NSIS + ZIP)
+        run: |
+          cpack -C build -G "NSIS;ZIP"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: limvine-windows
+          path: |
+            build/*.exe
+            build/*.zip
+            build/*.sha256
+
+  linux-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (Release)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j3
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Package (TGZ + DEB)
+        run: cpack -C build -G "TGZ;DEB"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: limvine-linux
+          path: |
+            build/*.tar.gz
+            build/*.deb
+            build/*.sha256
+
+  release:
+    needs: [windows-installer, linux-packages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum LimVine-* > SHA256SUMS
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            LimVine-*
+            SHA256SUMS

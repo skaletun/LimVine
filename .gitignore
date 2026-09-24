@@ -1,25 +1,44 @@
-# Артефакты сборки
+# Build directories
+build/
+build-dist/
+staging/
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+LimVineConfig.cmake
+LimVineConfigVersion.cmake
+Makefile
+install_manifest.txt
+Testing/
+
+# Compiled binaries and object files
 *.o
 *.obj
 *.a
+*.lib
+*.dll
 *.so
-*.dylib
+*.exe
+*.out
+*.bin
 *.d
-build/
-cmake-build-*/
-out/
-dist/
 
-# Кэш скомпилированного байткода LV Script (.lvs -> .lvc)
-*.lvc
-.lvcache/
+# Logs and temporary files
+*.log
+*.tmp
+.probe/
 
-# Редактор / IDE
+# Editor and IDE files
 .vscode/
 .idea/
 *.swp
-compile_commands.json
+*.swo
 
-# ОС
+# System files
 .DS_Store
 Thumbs.db

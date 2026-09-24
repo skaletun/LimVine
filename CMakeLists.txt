@@ -38,6 +38,7 @@ option(LV_WITH_OPENGL      "OpenGL-бэкенд рендера"                 
 option(LV_WITH_JOLT        "Физика Jolt (иначе встроенный детерминированный симулятор)" OFF)
 option(LV_WITH_OPENAL      "Звук OpenAL (иначе NullAudioBackend)"             OFF)
 option(LV_WITH_IMGUI       "ImGui для редактора и отладочных панелей"         OFF)
+option(LV_BUILD_SHARED     "Собирать движок как shared-библиотеку (по умолчанию статически)" OFF)
 
 # ---------------------------------------------------------------------------
 #  Базовые настройки компилятора
@@ -53,6 +54,21 @@ endif()
 
 if(MSVC)
     add_compile_options(/W4 /permissive- /utf-8 /Zc:__cplusplus)
+    # production-сборка под Windows: CRT только динамическая (MD/MDd).
+    # Статический CRT (/MT) в статической библиотеке движка запрещён самим
+    # MSVC при линковке с /GL-объектами других конфигураций и ломает
+    # единообразие аллокаторов в DLL-потребителях.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    # Отключённые предупреждения (осознанно, не глобальный /W0):
+    #   /wd4100 unreferenced formal parameter — аналог -Wno-unused-parameter
+    #     выше; сигнатуры интерфейсов (UIDraw, IPhysicsBackend) часто шире
+    #     конкретных реализаций.
+    #   /wd4505 unreferenced local function has been removed — static-хелперы
+    #     в тестах, используемые не во всех сборочных конфигурациях.
+    add_compile_options(/wd4100 /wd4505)
+    if(LV_WERROR)
+        add_compile_options(/WX)
+    endif()
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-unused-result)
     if(LV_WERROR)
@@ -72,8 +88,25 @@ file(GLOB_RECURSE LV_ENGINE_SOURCES CONFIGURE_DEPENDS
 list(FILTER LV_ENGINE_SOURCES EXCLUDE REGEX ".*/engine/editor/ImGuiBackend\\.cpp$")
 list(FILTER LV_ENGINE_SOURCES EXCLUDE REGEX ".*/engine/editor/main\\.cpp$")
 
-add_library(limvine STATIC ${LV_ENGINE_SOURCES})
+if(LV_BUILD_SHARED)
+    add_library(limvine SHARED ${LV_ENGINE_SOURCES})
+    # Макрос LV_BUILD_SHARED нужен заголовку core/Api.h, чтобы отличать
+    # сборку DLL от статической; PUBLIC — чтобы потребители видели dllimport.
+    target_compile_definitions(limvine PUBLIC LV_BUILD_SHARED=1)
+else()
+    add_library(limvine STATIC ${LV_ENGINE_SOURCES})
+    target_compile_definitions(limvine PUBLIC LIMVINE_STATIC=1)
+endif()
 add_library(limvine::limvine ALIAS limvine)
+
+set_target_properties(limvine PROPERTIES OUTPUT_NAME "limvine")
+
+# Внутренние символы движка не должны «протекать» в consumers: у MSVC их и
+# так нет (нет __declspec(dllexport)), а на GCC/Clang скрываем всё, кроме
+# явно экспортируемого API (см. LV_API в engine/core/Api.h).
+set_target_properties(limvine PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
 
 target_include_directories(limvine PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/engine>
@@ -274,17 +307,102 @@ if(LV_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-#  Установка
+#  Экспорт CMake (production): потребитель находит движок одной строкой
+#      find_package(LimVine REQUIRED)
+#      target_link_libraries(mygame PRIVATE limvine::limvine)
+#  Конфигурация генерируется из LimVineConfig.cmake.in и устанавливается
+#  вместе с целями, поэтому сборка работает и из build-дерева, и после
+#  install в системный префикс.
+#
+#  Важно: экспорт limvine возможен только при статической сборке — у
+#  INTERFACE-зависимостей без найденных пакетов (Null-бэкенды) нет рантайм-
+#  артефактов, которые можно было бы прописать в LimVineTargets.cmake.
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS limvine EXPORT LimVineTargets
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+include(CMakePackageConfigHelpers)
+
+if(NOT LV_BUILD_SHARED)
+    install(TARGETS limvine EXPORT LimVineTargets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    if(LV_BUILD_TOOLS)
+        install(TARGETS lvrun lvcook EXPORT LimVineTargets
+                RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+
+    install(EXPORT LimVineTargets
+            FILE LimVineTargets.cmake
+            NAMESPACE limvine::
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/LimVine)
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/LimVineConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/LimVineConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/LimVine)
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/LimVineConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion)
+    install(FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/LimVineConfig.cmake
+            ${CMAKE_CURRENT_BINARY_DIR}/LimVineConfigVersion.cmake
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/LimVine)
+else()
+    # Для shared-сборки цели движка и инструментов устанавливаются в те же
+    # стандартные каталоги (bin/lib), но без CMake-экспорта: потребитель
+    # подключает их вручную через find_library/find_path.
+    install(TARGETS limvine RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                          LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    if(LV_BUILD_TOOLS)
+        install(TARGETS lvrun lvcook RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+endif()
+
 install(DIRECTORY engine/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/limvine
         FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY stdlib templates DESTINATION ${CMAKE_INSTALL_DATADIR}/limvine)
-if(LV_BUILD_TOOLS)
-    install(TARGETS lvrun RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# ---------------------------------------------------------------------------
+#  CPack: готовые инсталляторы (Windows — NSIS .exe, Linux — TGZ/DEB)
+#  Подробнее в packaging/README.md; все переменные переопределяются с -D.
+# ---------------------------------------------------------------------------
+set(CPACK_PACKAGE_NAME "LimVine")
+set(CPACK_PACKAGE_VENDOR "LimVine Project")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "LimVine: low-poly 3D game engine with ECS, job system and LV Script")
+set(CPACK_PACKAGE_CONTACT "https://github.com/limvine/limvine")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "LimVine")
+string(TIMESTAMP LV_BUILD_DATE "%Y%m%d")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_CHECKSUM SHA256)
+set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
+set(CPACK_RESOURCE_FILE_README ${CMAKE_CURRENT_SOURCE_DIR}/README.md)
+set(CPACK_SOURCE_IGNORE_FILES "/build/;/\\\\.git/;dist/")
+if(WIN32)
+    # Многоязычный NSIS-мастер установки + uninstall.exe, ярлыки, PATH.
+    set(CPACK_GENERATOR "NSIS")
+    set(CPACK_NSIS_DISPLAY_NAME "LimVine ${PROJECT_VERSION}")
+    set(CPACK_NSIS_PACKAGE_NAME "LimVine")
+    set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\lvrun.exe")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MODIFY_PATH ON)
+    set(CPACK_NSIS_MUI_ICON ${CMAKE_CURRENT_SOURCE_DIR}/packaging/limvine.ico)
+    set(CPACK_NSIS_MUI_UNIICON ${CMAKE_CURRENT_SOURCE_DIR}/packaging/limvine.ico)
+    set(CPACK_NSIS_MENU_LINKS
+        "bin/lvrun.exe" "LimVine Runner (lvrun)"
+        "bin/lvcook.exe" "LimVine Content Cooker (lvcook)")
+    # Язык мастера: русский по умолчанию, английский как запасной.
+    set(CPACK_NSIS_LANGUAGE_LIST "Russian English")
+    # CPack сам прописывает в реестр ключи Add/Remove Programs (UninstallString,
+    # DisplayIcon, DisplayVersion) и генерирует uninstall.exe; ярлыки меню
+    # «Пуск» создаются из CPACK_NSIS_MENU_LINKS выше.
+else()
+    set(CPACK_GENERATOR "TGZ;DEB")
+    set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
+    set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 endif()
+include(CPack)
 
 message(STATUS "LimVine ${PROJECT_VERSION}: tests=${LV_BUILD_TESTS} tools=${LV_BUILD_TOOLS} "
                "editor=${LV_BUILD_EDITOR} vulkan=${LV_WITH_VULKAN} opengl=${LV_WITH_OPENGL} "

@@ -25,6 +25,7 @@
  * безопасно коммитить, удалять и переносить между машинами.
  */
 #include "lvscript/Bytecode.h"
+#include "core/Console.h"
 #include "lvscript/BytecodeCache.h"
 #include "lvscript/Compiler.h"
 #include "lvscript/Parser.h"
@@ -315,6 +316,7 @@ void usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    lv::core::initConsole();
     std::vector<std::string> args;
     std::string cmd;
     bool quiet = false;

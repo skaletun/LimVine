@@ -17,6 +17,7 @@
  * EditorApp можно встроить и в игровое окно (in-game editor).
  */
 #include "Panels.h"
+#include "core/Console.h"
 #include "../scripting/TemplateRunner.h"
 
 #include <cstdio>
@@ -39,6 +40,7 @@ void usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    lv::core::initConsole();
     bool dump = false;
     int frames = 0;
     std::string target;
